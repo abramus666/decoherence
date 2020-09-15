@@ -43,6 +43,7 @@ const default_vertex_shader = `
    uniform mat3  u_model_matrix;
    uniform mat3  u_camera_matrix;
    varying vec2  v_texcoord;
+   varying vec2  v_texcoord_shadow;
    varying vec3  v_tangent;
    varying vec3  v_bitangent;
    varying vec3  v_normal;
@@ -76,6 +77,10 @@ const default_vertex_shader = `
       // Z=1 for multiplication by matrix since those are 2D transformations.
       // Z=0, W=1 in the final value.
       gl_Position = vec4((u_camera_matrix * u_model_matrix * position).xy, 0.0, 1.0);
+
+      // Calculate texture coordinates for shadow map based on the position
+      // in camera space, and pass them to the fragment shader.
+      v_texcoord_shadow = vec2(gl_Position.x * 0.5 + 0.5, gl_Position.y * 0.5 + 0.5);
    }
 `;
 
@@ -89,16 +94,18 @@ const default_fragment_shader = `
    uniform sampler2D u_diffuse_map;
    uniform sampler2D u_specular_map;
    uniform sampler2D u_normal_map;
+   uniform sampler2D u_shadow_map;
    uniform vec3  u_camera_position;
    uniform vec3  u_light_position;
    uniform float u_light_attenuation;
    uniform float u_gamma;
    varying vec2  v_texcoord;
+   varying vec2  v_texcoord_shadow;
    varying vec3  v_tangent;
    varying vec3  v_bitangent;
    varying vec3  v_normal;
    varying vec3  v_position;
-   const float c_ambient = 0.005;
+   const float c_ambient = 0.001;
    const float c_shininess = 64.0;
 
    void main(void) {
@@ -106,6 +113,40 @@ const default_fragment_shader = `
       vec4 diffuse_texel  = texture2D(u_diffuse_map,  v_texcoord);
       vec4 specular_texel = texture2D(u_specular_map, v_texcoord);
       vec4 normal_texel   = texture2D(u_normal_map,   v_texcoord);
+      vec4 shadow_texel   = texture2D(u_shadow_map,   v_texcoord_shadow);
+
+      float shadow = shadow_texel.r;
+      float du = shadow_texel.g;
+      float dv = shadow_texel.b;
+      float u = v_texcoord_shadow.x;
+      float v = v_texcoord_shadow.y;
+
+      shadow += texture2D(u_shadow_map, vec2(u-du*0.5, v-dv*0.866)).r;
+      shadow += texture2D(u_shadow_map, vec2(u,        v-dv*0.866)).r;
+      shadow += texture2D(u_shadow_map, vec2(u+du*0.5, v-dv*0.866)).r;
+
+      shadow += texture2D(u_shadow_map, vec2(u-du*0.75, v-dv*0.433)).r;
+      shadow += texture2D(u_shadow_map, vec2(u-du*0.25, v-dv*0.433)).r;
+      shadow += texture2D(u_shadow_map, vec2(u+du*0.25, v-dv*0.433)).r;
+      shadow += texture2D(u_shadow_map, vec2(u+du*0.75, v-dv*0.433)).r;
+
+      shadow += texture2D(u_shadow_map, vec2(u-du,      v)).r;
+      shadow += texture2D(u_shadow_map, vec2(u-du*0.5,  v)).r;
+      shadow += texture2D(u_shadow_map, vec2(u+du*0.5,  v)).r;
+      shadow += texture2D(u_shadow_map, vec2(u+du,      v)).r;
+
+      shadow += texture2D(u_shadow_map, vec2(u-du*0.75, v+dv*0.433)).r;
+      shadow += texture2D(u_shadow_map, vec2(u-du*0.25, v+dv*0.433)).r;
+      shadow += texture2D(u_shadow_map, vec2(u+du*0.25, v+dv*0.433)).r;
+      shadow += texture2D(u_shadow_map, vec2(u+du*0.75, v+dv*0.433)).r;
+
+      shadow += texture2D(u_shadow_map, vec2(u-du*0.5, v+dv*0.866)).r;
+      shadow += texture2D(u_shadow_map, vec2(u,        v+dv*0.866)).r;
+      shadow += texture2D(u_shadow_map, vec2(u+du*0.5, v+dv*0.866)).r;
+
+      shadow /= 19.0;
+
+
 
       // Calculate base color from the ambient value and diffuse texel.
       vec3 color = c_ambient * diffuse_texel.rgb;
@@ -135,7 +176,7 @@ const default_fragment_shader = `
       float specular = pow(max(dot(normal, halfway), 0.0), c_shininess);
 
       // Add diffuse and specular colors to the final color.
-      color += luminosity * ((diffuse * diffuse_texel.rgb) + (specular * specular_texel.rgb));
+      color += shadow * luminosity * ((diffuse * diffuse_texel.rgb) + (specular * specular_texel.rgb));
 
       // Apply gamma correction to the final color.
       color = pow(color, vec3(1.0 / u_gamma));
@@ -162,6 +203,7 @@ function DefaultShader(gl) {
    let loc_diffuse_map   = gl.getUniformLocation(prog, 'u_diffuse_map');
    let loc_specular_map  = gl.getUniformLocation(prog, 'u_specular_map');
    let loc_normal_map    = gl.getUniformLocation(prog, 'u_normal_map');
+   let loc_shadow_map    = gl.getUniformLocation(prog, 'u_shadow_map');
    this.enable = function () {
       gl.useProgram(prog);
       gl.enableVertexAttribArray(loc_texcoord);
@@ -172,6 +214,7 @@ function DefaultShader(gl) {
       gl.uniform1i(loc_diffuse_map,  0);
       gl.uniform1i(loc_specular_map, 1);
       gl.uniform1i(loc_normal_map,   2);
+      gl.uniform1i(loc_shadow_map,   3);
    };
    this.setupGeometry = function (buf_texcoord, buf_tangent1, buf_tangent2, buf_position1, buf_position2, position_delta) {
       gl.bindBuffer(gl.ARRAY_BUFFER, buf_texcoord);
@@ -205,16 +248,16 @@ function DefaultShader(gl) {
 //==============================================================================
 
 const shadow_vertex_shader = `
-   attribute vec3 a_position_alpha;
+   attribute vec4 a_position_delta_uv;
    uniform mat3 u_model_matrix;
    uniform mat3 u_camera_matrix;
    varying vec4 v_color;
 
    void main(void) {
-      vec3 position = vec3(a_position_alpha.xy, 1.0);
-      float alpha = a_position_alpha.z;
-
-      v_color = vec4(1.0-alpha, 1.0-alpha, 1.0-alpha, 1.0);
+      vec3 position = vec3(a_position_delta_uv.xy, 1.0);
+      float du = a_position_delta_uv.z;
+      float dv = a_position_delta_uv.w;
+      v_color = vec4(0.0, du, dv, 1.0);
       gl_Position = vec4((u_camera_matrix * u_model_matrix * position).xy, 0.0, 1.0);
    }
 `;
@@ -230,16 +273,16 @@ const shadow_fragment_shader = `
 
 function ShadowShader(gl) {
    let prog = buildShaderProgram(gl, shadow_vertex_shader, shadow_fragment_shader);
-   let loc_position_alpha = gl.getAttribLocation(prog, 'a_position_alpha');
+   let loc_position_delta_uv = gl.getAttribLocation(prog, 'a_position_delta_uv');
    let loc_model_matrix   = gl.getUniformLocation(prog, 'u_model_matrix');
    let loc_camera_matrix  = gl.getUniformLocation(prog, 'u_camera_matrix');
    this.enable = function () {
       gl.useProgram(prog);
-      gl.enableVertexAttribArray(loc_position_alpha);
+      gl.enableVertexAttribArray(loc_position_delta_uv);
    };
-   this.setupGeometry = function (buf_position_alpha) {
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf_position_alpha);
-      gl.vertexAttribPointer(loc_position_alpha, 3, gl.FLOAT, false, 0, 0);
+   this.setupGeometry = function (buf_position_delta_uv) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf_position_delta_uv);
+      gl.vertexAttribPointer(loc_position_delta_uv, 4, gl.FLOAT, false, 0, 0);
    };
    this.setupModel = function (matrix) {
       gl.uniformMatrix3fv(loc_model_matrix, false, matrix);
@@ -328,8 +371,8 @@ function linearizeImage(image) {
 
 function Texture(gl, image, srgb_to_linear) {
    this.glcontext = gl;
-   this.id = gl.createTexture();
-   gl.bindTexture(gl.TEXTURE_2D, this.id);
+   this.texture_id = gl.createTexture();
+   gl.bindTexture(gl.TEXTURE_2D, this.texture_id);
    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -351,7 +394,32 @@ function Texture(gl, image, srgb_to_linear) {
 Texture.prototype.bindTo = function (index) {
    let gl = this.glcontext;
    gl.activeTexture(gl.TEXTURE0 + index);
-   gl.bindTexture(gl.TEXTURE_2D, this.id);
+   gl.bindTexture(gl.TEXTURE_2D, this.texture_id);
+}
+
+//==============================================================================
+
+function Framebuffer(gl, width, height) {
+   let texture_id = gl.createTexture();
+   gl.bindTexture(gl.TEXTURE_2D, texture_id);
+   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+   let framebuffer_id = gl.createFramebuffer();
+   gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer_id);
+   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture_id, 0);
+
+   this.bind = function () {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer_id);
+      gl.viewport(0, 0, width, height);
+   };
+   this.bindTextureTo = function (index) {
+      gl.activeTexture(gl.TEXTURE0 + index);
+      gl.bindTexture(gl.TEXTURE_2D, texture_id);
+   };
 }
 
 //==============================================================================
@@ -646,82 +714,88 @@ function projectPoint(point, angle, bbox) {
    return [x, y];
 }
 
-function projectEdge(add_geometry_func, edge, light, bbox) {
-   let dx1 = edge.pt1[0] - light.position[0];
-   let dy1 = edge.pt1[1] - light.position[1];
-   let dx2 = edge.pt2[0] - light.position[0];
-   let dy2 = edge.pt2[1] - light.position[1];
-   // Calculate angles for hard/soft shadows casted from points of the edge.
-   // The soft shadow area depends on the light source size.
-   let a1 = Math.atan2(dy1, dx1);
-   let a2 = Math.atan2(dy2, dx2);
-   let da1 = Math.atan(light.source_radius / Math.sqrt(dx1*dx1 + dy1*dy1));
-   let da2 = Math.atan(light.source_radius / Math.sqrt(dx2*dx2 + dy2*dy2));
-   let a11 = a1+da1;
-   let a12 = a1-da1;
-   let a21 = a2+da2;
-   let a22 = a2-da2;
-   // Make sure the angles are in correct ranges.
-   if (a11 >   Math.PI) a11 -= 2*Math.PI;
-   if (a12 <= -Math.PI) a12 += 2*Math.PI;
-   if (a21 >   Math.PI) a21 -= 2*Math.PI;
-   if (a22 <= -Math.PI) a22 += 2*Math.PI;
+function projectEdge(add_geometry_func, edge, light, camera_bbox) {
+   let edge_pt1 = edge.pt1;
+   let edge_pt2 = edge.pt2;
+   // Calculate angles for shadows casted from points of the edge.
+   let angle1 = Math.atan2(edge_pt1[1] - light.position[1], edge_pt1[0] - light.position[0]);
+   let angle2 = Math.atan2(edge_pt2[1] - light.position[1], edge_pt2[0] - light.position[0]);
+   // Make sure that '1' identifies the shadow angle of lesser value.
+   if (angle1 > angle2) {
+      let a = angle1;
+      angle1 = angle2;
+      angle2 = a;
+      edge_pt1 = edge.pt2;
+      edge_pt2 = edge.pt1;
+   }
    // Make sure the bounding box is large enough, but don't modify the original one.
-   let bbox_copy = {
-      left:   Math.min(bbox.left,   edge.pt1[0], edge.pt2[0]),
-      right:  Math.max(bbox.right,  edge.pt1[0], edge.pt2[0]),
-      bottom: Math.min(bbox.bottom, edge.pt1[1], edge.pt2[1]),
-      top:    Math.max(bbox.top,    edge.pt1[1], edge.pt2[1])
+   let bbox = {
+      left:   Math.min(camera_bbox.left,   edge_pt1[0], edge_pt2[0]),
+      right:  Math.max(camera_bbox.right,  edge_pt1[0], edge_pt2[0]),
+      bottom: Math.min(camera_bbox.bottom, edge_pt1[1], edge_pt2[1]),
+      top:    Math.max(camera_bbox.top,    edge_pt1[1], edge_pt2[1])
    };
    // Project edge points into the bounding box.
-   let pt11 = projectPoint(edge.pt1, a11, bbox_copy);
-   let pt12 = projectPoint(edge.pt1, a12, bbox_copy);
-   let pt21 = projectPoint(edge.pt2, a21, bbox_copy);
-   let pt22 = projectPoint(edge.pt2, a22, bbox_copy);
-   // Calculate squared distances between projected points to determine which
-   // ones are inner (for hard shadows) and which ones are outer (for soft shadows).
-   let dsq_11_21 = (pt11[0]-pt21[0])*(pt11[0]-pt21[0]) + (pt11[1]-pt21[1])*(pt11[1]-pt21[1]);
-   let dsq_12_21 = (pt12[0]-pt21[0])*(pt12[0]-pt21[0]) + (pt12[1]-pt21[1])*(pt12[1]-pt21[1]);
-   let dsq_12_22 = (pt12[0]-pt22[0])*(pt12[0]-pt22[0]) + (pt12[1]-pt22[1])*(pt12[1]-pt22[1]);
-   let pt1in  = pt11;
-   let pt1out = pt12;
-   let pt2in  = pt21;
-   let pt2out = pt22;
-   if (dsq_11_21 > dsq_12_21) {
-      pt1in  = pt12;
-      pt1out = pt11;
-   }
-   if (dsq_12_21 > dsq_12_22) {
-      pt2in  = pt22;
-      pt2out = pt21;
-   }
-   addHardShadow(add_geometry_func, edge.pt1, pt1in, edge.pt2, pt2in);
-   addSoftShadow(add_geometry_func, edge.pt1, pt1in, pt1out);
-   addSoftShadow(add_geometry_func, edge.pt2, pt2in, pt2out);
-}
+   let bbox_pt1 = projectPoint(edge_pt1, angle1, bbox);
+   let bbox_pt2 = projectPoint(edge_pt2, angle2, bbox);
 
-function addHardShadow(add_geometry_func, edge_pt1, bbox_pt1, edge_pt2, bbox_pt2) {
-   let arr = [
-      edge_pt1[0], edge_pt1[1], 1.0,
-      edge_pt2[0], edge_pt2[1], 1.0,
-      bbox_pt1[0], bbox_pt1[1], 1.0,
-      edge_pt2[0], edge_pt2[1], 1.0,
-      bbox_pt1[0], bbox_pt1[1], 1.0,
-      bbox_pt2[0], bbox_pt2[1], 1.0
+
+
+   let d1a = Math.sqrt((edge_pt1[0]-bbox_pt1[0])*(edge_pt1[0]-bbox_pt1[0])+(edge_pt1[1]-bbox_pt1[1])*(edge_pt1[1]-bbox_pt1[1]));
+   let d1b = Math.sqrt((edge_pt1[0]-light.position[0])*(edge_pt1[0]-light.position[0])+(edge_pt1[1]-light.position[1])*(edge_pt1[1]-light.position[1]));
+
+   let du1 = (light.source_radius * d1a/d1b) / (camera_bbox.right - camera_bbox.left);
+   let dv1 = (light.source_radius * d1a/d1b) / (camera_bbox.top - camera_bbox.bottom);
+
+
+
+   let d2a = Math.sqrt((edge_pt2[0]-bbox_pt2[0])*(edge_pt2[0]-bbox_pt2[0])+(edge_pt2[1]-bbox_pt2[1])*(edge_pt2[1]-bbox_pt2[1]));
+   let d2b = Math.sqrt((edge_pt2[0]-light.position[0])*(edge_pt2[0]-light.position[0])+(edge_pt2[1]-light.position[1])*(edge_pt2[1]-light.position[1]));
+
+   let du2 = (light.source_radius * d2a/d2b) / (camera_bbox.right - camera_bbox.left);
+   let dv2 = (light.source_radius * d2a/d2b) / (camera_bbox.top - camera_bbox.bottom);
+
+
+
+   let angle_bl = Math.atan2(bbox.bottom - light.position[1], bbox.left  - light.position[0]);
+   let angle_br = Math.atan2(bbox.bottom - light.position[1], bbox.right - light.position[0]);
+   let angle_tl = Math.atan2(bbox.top    - light.position[1], bbox.left  - light.position[0]);
+   let angle_tr = Math.atan2(bbox.top    - light.position[1], bbox.right - light.position[0]);
+
+   let corners = [
+      [angle_bl, bbox.left,  bbox.bottom, 0.0, 0.0],
+      [angle_br, bbox.right, bbox.bottom, 0.0, 0.0],
+      [angle_tl, bbox.left,  bbox.top,    0.0, 0.0],
+      [angle_tr, bbox.right, bbox.top,    0.0, 0.0]
    ];
+   corners.sort((a,b) => a[0]-b[0]);
+
+
+
+   let arr = [
+      edge_pt1[0], edge_pt1[1], 0.0, 0.0,
+      edge_pt2[0], edge_pt2[1], 0.0, 0.0,
+      bbox_pt1[0], bbox_pt1[1], du1, dv1,
+      edge_pt2[0], edge_pt2[1], 0.0, 0.0,
+      bbox_pt1[0], bbox_pt1[1], du1, dv1,
+      bbox_pt2[0], bbox_pt2[1], du2, dv2,
+   ];
+   if (angle2 - angle1 < Math.PI) {
+      for (let corner of corners) {
+         if (angle1 < corner[0] && corner[0] < angle2) {
+            arr = arr.concat(arr.slice(-8), corner.slice(1));
+         }
+      }
+   } else {
+      for (let corner of corners) {
+         if (angle1 > corner[0] || corner[0] > angle2) {
+            arr = arr.concat(arr.slice(-8), corner.slice(1));
+         }
+      }
+   }
+
    add_geometry_func(arr);
 }
-
-function addSoftShadow(add_geometry_func, edge_pt, bbox_pt_inner, bbox_pt_outer) {
-   let arr = [
-      edge_pt[0],       edge_pt[1],       0.5,
-      bbox_pt_inner[0], bbox_pt_inner[1], 0.5,
-      bbox_pt_outer[0], bbox_pt_outer[1], 0.5
-   ];
-   //add_geometry_func(arr);
-}
-
-
 
 
 
