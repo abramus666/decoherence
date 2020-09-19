@@ -95,6 +95,7 @@ const default_fragment_shader = `
    uniform sampler2D u_specular_map;
    uniform sampler2D u_normal_map;
    uniform sampler2D u_shadow_map;
+   uniform sampler2D u_random_map;
    uniform vec3  u_camera_position;
    uniform vec3  u_light_position;
    uniform float u_light_attenuation;
@@ -114,37 +115,28 @@ const default_fragment_shader = `
       vec4 specular_texel = texture2D(u_specular_map, v_texcoord);
       vec4 normal_texel   = texture2D(u_normal_map,   v_texcoord);
       vec4 shadow_texel   = texture2D(u_shadow_map,   v_texcoord_shadow);
+      vec4 random_texel   = texture2D(u_random_map,   v_texcoord_shadow);
 
-      float shadow = shadow_texel.r;
-      float du = shadow_texel.g;
-      float dv = shadow_texel.b;
-      float u = v_texcoord_shadow.x;
-      float v = v_texcoord_shadow.y;
+      float rng = 0.0;
+      float shadow = 0.0;
+      float ds = 0.005 * shadow_texel.s;
+      float dt = 0.010 * shadow_texel.t;
+      float s0 = v_texcoord_shadow.s;
+      float t0 = v_texcoord_shadow.t;
 
-      shadow += texture2D(u_shadow_map, vec2(u-du*0.5, v-dv*0.866)).r;
-      shadow += texture2D(u_shadow_map, vec2(u,        v-dv*0.866)).r;
-      shadow += texture2D(u_shadow_map, vec2(u+du*0.5, v-dv*0.866)).r;
+      for (float i = -2.0; i < 2.0; i += 1.0) {
+         for (float j = -2.0; j < 2.0; j += 1.0) {
+            rng = fract(rng * random_texel[0] + random_texel[1]);
+            float s = s0 + ds*i + ds*rng;
+            rng = fract(rng * random_texel[2] + random_texel[3]);
+            float t = t0 + dt*j + dt*rng;
+            shadow += texture2D(u_shadow_map, vec2(s,t)).a;
+         }
+      }
 
-      shadow += texture2D(u_shadow_map, vec2(u-du*0.75, v-dv*0.433)).r;
-      shadow += texture2D(u_shadow_map, vec2(u-du*0.25, v-dv*0.433)).r;
-      shadow += texture2D(u_shadow_map, vec2(u+du*0.25, v-dv*0.433)).r;
-      shadow += texture2D(u_shadow_map, vec2(u+du*0.75, v-dv*0.433)).r;
-
-      shadow += texture2D(u_shadow_map, vec2(u-du,      v)).r;
-      shadow += texture2D(u_shadow_map, vec2(u-du*0.5,  v)).r;
-      shadow += texture2D(u_shadow_map, vec2(u+du*0.5,  v)).r;
-      shadow += texture2D(u_shadow_map, vec2(u+du,      v)).r;
-
-      shadow += texture2D(u_shadow_map, vec2(u-du*0.75, v+dv*0.433)).r;
-      shadow += texture2D(u_shadow_map, vec2(u-du*0.25, v+dv*0.433)).r;
-      shadow += texture2D(u_shadow_map, vec2(u+du*0.25, v+dv*0.433)).r;
-      shadow += texture2D(u_shadow_map, vec2(u+du*0.75, v+dv*0.433)).r;
-
-      shadow += texture2D(u_shadow_map, vec2(u-du*0.5, v+dv*0.866)).r;
-      shadow += texture2D(u_shadow_map, vec2(u,        v+dv*0.866)).r;
-      shadow += texture2D(u_shadow_map, vec2(u+du*0.5, v+dv*0.866)).r;
-
-      shadow /= 19.0;
+      shadow /= 16.0;
+      shadow = 1.0 - shadow;
+      shadow = pow(shadow, u_gamma);
 
 
 
@@ -204,6 +196,7 @@ function DefaultShader(gl) {
    let loc_specular_map  = gl.getUniformLocation(prog, 'u_specular_map');
    let loc_normal_map    = gl.getUniformLocation(prog, 'u_normal_map');
    let loc_shadow_map    = gl.getUniformLocation(prog, 'u_shadow_map');
+   let loc_random_map    = gl.getUniformLocation(prog, 'u_random_map');
    this.enable = function () {
       gl.useProgram(prog);
       gl.enableVertexAttribArray(loc_texcoord);
@@ -215,6 +208,7 @@ function DefaultShader(gl) {
       gl.uniform1i(loc_specular_map, 1);
       gl.uniform1i(loc_normal_map,   2);
       gl.uniform1i(loc_shadow_map,   3);
+      gl.uniform1i(loc_random_map,   4);
    };
    this.setupGeometry = function (buf_texcoord, buf_tangent1, buf_tangent2, buf_position1, buf_position2, position_delta) {
       gl.bindBuffer(gl.ARRAY_BUFFER, buf_texcoord);
@@ -248,17 +242,15 @@ function DefaultShader(gl) {
 //==============================================================================
 
 const shadow_vertex_shader = `
-   attribute vec4 a_position_delta_uv;
+   attribute vec3 a_position;
    uniform mat3 u_model_matrix;
    uniform mat3 u_camera_matrix;
    varying vec4 v_color;
 
    void main(void) {
-      vec3 position = vec3(a_position_delta_uv.xy, 1.0);
-      float du = a_position_delta_uv.z;
-      float dv = a_position_delta_uv.w;
-      v_color = vec4(0.0, du, dv, 1.0);
-      gl_Position = vec4((u_camera_matrix * u_model_matrix * position).xy, 0.0, 1.0);
+      vec3 position = vec3(a_position.xy, 1.0);
+      v_color = vec4(a_position.zzz, 1.0);
+      gl_Position = vec4((u_camera_matrix * u_model_matrix * position).xy, a_position.z, 1.0);
    }
 `;
 
@@ -273,16 +265,16 @@ const shadow_fragment_shader = `
 
 function ShadowShader(gl) {
    let prog = buildShaderProgram(gl, shadow_vertex_shader, shadow_fragment_shader);
-   let loc_position_delta_uv = gl.getAttribLocation(prog, 'a_position_delta_uv');
-   let loc_model_matrix   = gl.getUniformLocation(prog, 'u_model_matrix');
-   let loc_camera_matrix  = gl.getUniformLocation(prog, 'u_camera_matrix');
+   let loc_position      = gl.getAttribLocation(prog, 'a_position');
+   let loc_model_matrix  = gl.getUniformLocation(prog, 'u_model_matrix');
+   let loc_camera_matrix = gl.getUniformLocation(prog, 'u_camera_matrix');
    this.enable = function () {
       gl.useProgram(prog);
-      gl.enableVertexAttribArray(loc_position_delta_uv);
+      gl.enableVertexAttribArray(loc_position);
    };
-   this.setupGeometry = function (buf_position_delta_uv) {
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf_position_delta_uv);
-      gl.vertexAttribPointer(loc_position_delta_uv, 4, gl.FLOAT, false, 0, 0);
+   this.setupGeometry = function (buf_position) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf_position);
+      gl.vertexAttribPointer(loc_position, 3, gl.FLOAT, false, 0, 0);
    };
    this.setupModel = function (matrix) {
       gl.uniformMatrix3fv(loc_model_matrix, false, matrix);
@@ -324,8 +316,11 @@ function ResourceLoader(gl) {
       }
    }
 
-   this.loadTexture = function (url, srgb_to_linear = false) {
-      loadImage(url, image => new Texture(gl, image, srgb_to_linear));
+   this.loadTexture = function (url) {
+      loadImage(url, image => new TextureFromImage(gl, image));
+   };
+   this.loadTexture_sRGB = function (url) {
+      loadImage(url, image => new TextureFromImage_sRGB(gl, image));
    };
    this.loadModel = function (url) {
       loadJson(url, json => new Model(gl, json));
@@ -369,73 +364,98 @@ function linearizeImage(image) {
    return pixels;
 }
 
-function Texture(gl, image, srgb_to_linear) {
+function createAndSetupTexture(gl, filter, wrap) {
+   let id = gl.createTexture();
+   gl.bindTexture(gl.TEXTURE_2D, id);
+   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
+   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+   return id;
+}
+
+function TextureFromImage(gl, image) {
    this.glcontext = gl;
-   this.texture_id = gl.createTexture();
-   gl.bindTexture(gl.TEXTURE_2D, this.texture_id);
-   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-   if (srgb_to_linear) {
-      // Using extension is preferable because storing linearized
-      // colors with 8-bit resolution will cause loss of information.
-      let ext = gl.getExtension('EXT_sRGB');
-      if (ext) {
-         gl.texImage2D(gl.TEXTURE_2D, 0, ext.SRGB_ALPHA_EXT, ext.SRGB_ALPHA_EXT, gl.UNSIGNED_BYTE, image);
-      } else {
-         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, image.width, image.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, linearizeImage(image));
-      }
+   this.id = createAndSetupTexture(gl, gl.LINEAR, gl.CLAMP_TO_EDGE);
+   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+}
+
+function TextureFromImage_sRGB(gl, image) {
+   this.glcontext = gl;
+   this.id = createAndSetupTexture(gl, gl.LINEAR, gl.CLAMP_TO_EDGE);
+   // Using extension is preferable because storing linearized
+   // colors with 8-bit resolution will cause loss of information.
+   let ext = gl.getExtension('EXT_sRGB');
+   if (ext) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, ext.SRGB_ALPHA_EXT, ext.SRGB_ALPHA_EXT, gl.UNSIGNED_BYTE, image);
    } else {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, image.width, image.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, linearizeImage(image));
    }
 }
 
-Texture.prototype.bindTo = function (index) {
+function TextureFromPixels(gl, width, height, pixels) {
+   this.glcontext = gl;
+   this.id = createAndSetupTexture(gl, gl.LINEAR, gl.CLAMP_TO_EDGE);
+   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+}
+
+function TextureFromRandomBytes(gl, width, height) {
+   this.glcontext = gl;
+   this.id = createAndSetupTexture(gl, gl.LINEAR, gl.REPEAT);
+   let nbytes = width * height * 4;
+   let pixels = new Uint8Array(nbytes);
+   for (let i = 0; i < nbytes; i++) {
+      pixels[i] = Math.round(Math.random() * 255.0);
+   }
+   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+}
+
+TextureFromImage.prototype.bindTo =
+TextureFromImage_sRGB.prototype.bindTo =
+TextureFromPixels.prototype.bindTo =
+TextureFromRandomBytes.prototype.bindTo = function (index) {
    let gl = this.glcontext;
    gl.activeTexture(gl.TEXTURE0 + index);
-   gl.bindTexture(gl.TEXTURE_2D, this.texture_id);
+   gl.bindTexture(gl.TEXTURE_2D, this.id);
 }
 
 //==============================================================================
 
 function Framebuffer(gl, width, height) {
-   let texture_id = gl.createTexture();
-   gl.bindTexture(gl.TEXTURE_2D, texture_id);
-   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+   let texture = new TextureFromPixels(gl, width, height, null);
 
-   let framebuffer_id = gl.createFramebuffer();
-   gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer_id);
-   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture_id, 0);
+   let depthbuf_id = gl.createRenderbuffer();
+   gl.bindRenderbuffer(gl.RENDERBUFFER, depthbuf_id);
+   gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, width, height);
+
+   let framebuf_id = gl.createFramebuffer();
+   gl.bindFramebuffer(gl.FRAMEBUFFER, framebuf_id);
+   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture.id, 0);
+   gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthbuf_id);
 
    this.bind = function () {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer_id);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuf_id);
       gl.viewport(0, 0, width, height);
    };
    this.bindTextureTo = function (index) {
-      gl.activeTexture(gl.TEXTURE0 + index);
-      gl.bindTexture(gl.TEXTURE_2D, texture_id);
+      texture.bindTo(index);
    };
 }
 
 //==============================================================================
 
 function calculateTangent(vix1, vix2, vix3, texcoords, vertices) {
-   let du1 = texcoords[vix2][0] - texcoords[vix1][0];
-   let dv1 = texcoords[vix2][1] - texcoords[vix1][1];
-   let du2 = texcoords[vix3][0] - texcoords[vix1][0];
-   let dv2 = texcoords[vix3][1] - texcoords[vix1][1];
+   let ds1 = texcoords[vix2][0] - texcoords[vix1][0];
+   let dt1 = texcoords[vix2][1] - texcoords[vix1][1];
+   let ds2 = texcoords[vix3][0] - texcoords[vix1][0];
+   let dt2 = texcoords[vix3][1] - texcoords[vix1][1];
    let dx1 = vertices[vix2][0] - vertices[vix1][0];
    let dy1 = vertices[vix2][1] - vertices[vix1][1];
    let dx2 = vertices[vix3][0] - vertices[vix1][0];
    let dy2 = vertices[vix3][1] - vertices[vix1][1];
-   let f = 1.0 / (du1 * dv2 - du2 * dv1);
-   let tx = f * (dv2 * dx1 - dv1 * dx2);
-   let ty = f * (dv2 * dy1 - dv1 * dy2);
+   let f = 1.0 / (ds1 * dt2 - ds2 * dt1);
+   let tx = f * (dt2 * dx1 - dt1 * dx2);
+   let ty = f * (dt2 * dy1 - dt1 * dy2);
    return [tx, ty];
 }
 
@@ -627,7 +647,7 @@ function Map(gl, json) {
    this.tangent_buffer = new ArrayBuffer(gl, calculateTangents(getPolygons(polygons), texcoords, vertices));
    this.vertex_buffer = new ArrayBuffer(gl, vertices);
    this.index_buffer = new DynamicElementArrayBuffer(gl, 4*1024);
-   this.shadow_buffer = new DynamicArrayBuffer(gl, 16*1024);
+   this.shadow_buffer = new DynamicArrayBuffer(gl, 256*1024);
 }
 
 Map.prototype.draw = function (shader, camera) {
@@ -650,7 +670,7 @@ Map.prototype.draw = function (shader, camera) {
 
 
 
-Map.prototype.drawShadows = function (shader, camera, light) {
+Map.prototype.drawShadowMapAlpha = function (shader, camera, light) {
    let gl = this.glcontext;
    let buf = this.shadow_buffer;
    let bbox = camera.getBoundingBox();
@@ -659,15 +679,33 @@ Map.prototype.drawShadows = function (shader, camera, light) {
       buf.count += arr.length;
    };
    let collect_edge = function (node) {
-      projectEdge(add_geometry, node, light, bbox);
+      castShadow(add_geometry, light, node, bbox);
    };
    gl.bindBuffer(gl.ARRAY_BUFFER, buf.id);
    this.entities_root.traverse(collect_edge, bbox);
    shader.setupGeometry(buf.id);
-   gl.drawArrays(gl.TRIANGLES, 0, buf.count)
+   gl.drawArrays(gl.TRIANGLES, 0, buf.count / 3); // Each vertex has 3 components.
    buf.count = 0;
 }
 
+Map.prototype.drawShadowMapColor = function (shader, camera, light) {
+   let gl = this.glcontext;
+   let buf = this.shadow_buffer;
+   let bbox = camera.getBoundingBox();
+   let add_geometry = function (arr) {
+      gl.bufferSubData(gl.ARRAY_BUFFER, (buf.count * 4), new Float32Array(arr));
+      buf.count += arr.length;
+   };
+   let collect_edge = function (node) {
+      sharpenShadow(add_geometry, node.pt1);
+      sharpenShadow(add_geometry, node.pt2);
+   };
+   gl.bindBuffer(gl.ARRAY_BUFFER, buf.id);
+   this.entities_root.traverse(collect_edge, bbox);
+   shader.setupGeometry(buf.id);
+   gl.drawArrays(gl.TRIANGLES, 0, buf.count / 3); // Each vertex has 3 components.
+   buf.count = 0;
+}
 
 
 
@@ -714,13 +752,17 @@ function projectPoint(point, angle, bbox) {
    return [x, y];
 }
 
-function projectEdge(add_geometry_func, edge, light, camera_bbox) {
+
+
+
+
+function castShadow(add_geometry_func, light, edge, camera_bbox) {
    let edge_pt1 = edge.pt1;
    let edge_pt2 = edge.pt2;
    // Calculate angles for shadows casted from points of the edge.
    let angle1 = Math.atan2(edge_pt1[1] - light.position[1], edge_pt1[0] - light.position[0]);
    let angle2 = Math.atan2(edge_pt2[1] - light.position[1], edge_pt2[0] - light.position[0]);
-   // Make sure that '1' identifies the shadow angle of lesser value.
+   // Make sure that '1' identifies the angle of lesser value.
    if (angle1 > angle2) {
       let a = angle1;
       angle1 = angle2;
@@ -728,6 +770,8 @@ function projectEdge(add_geometry_func, edge, light, camera_bbox) {
       edge_pt1 = edge.pt2;
       edge_pt2 = edge.pt1;
    }
+
+   // TODO: Precalculate
    // Make sure the bounding box is large enough, but don't modify the original one.
    let bbox = {
       left:   Math.min(camera_bbox.left,   edge_pt1[0], edge_pt2[0]),
@@ -741,55 +785,42 @@ function projectEdge(add_geometry_func, edge, light, camera_bbox) {
 
 
 
-   let d1a = Math.sqrt((edge_pt1[0]-bbox_pt1[0])*(edge_pt1[0]-bbox_pt1[0])+(edge_pt1[1]-bbox_pt1[1])*(edge_pt1[1]-bbox_pt1[1]));
-   let d1b = Math.sqrt((edge_pt1[0]-light.position[0])*(edge_pt1[0]-light.position[0])+(edge_pt1[1]-light.position[1])*(edge_pt1[1]-light.position[1]));
 
-   let du1 = (light.source_radius * d1a/d1b) / (camera_bbox.right - camera_bbox.left);
-   let dv1 = (light.source_radius * d1a/d1b) / (camera_bbox.top - camera_bbox.bottom);
-
-
-
-   let d2a = Math.sqrt((edge_pt2[0]-bbox_pt2[0])*(edge_pt2[0]-bbox_pt2[0])+(edge_pt2[1]-bbox_pt2[1])*(edge_pt2[1]-bbox_pt2[1]));
-   let d2b = Math.sqrt((edge_pt2[0]-light.position[0])*(edge_pt2[0]-light.position[0])+(edge_pt2[1]-light.position[1])*(edge_pt2[1]-light.position[1]));
-
-   let du2 = (light.source_radius * d2a/d2b) / (camera_bbox.right - camera_bbox.left);
-   let dv2 = (light.source_radius * d2a/d2b) / (camera_bbox.top - camera_bbox.bottom);
-
-
-
+   // TODO: Precalculate
    let angle_bl = Math.atan2(bbox.bottom - light.position[1], bbox.left  - light.position[0]);
    let angle_br = Math.atan2(bbox.bottom - light.position[1], bbox.right - light.position[0]);
    let angle_tl = Math.atan2(bbox.top    - light.position[1], bbox.left  - light.position[0]);
    let angle_tr = Math.atan2(bbox.top    - light.position[1], bbox.right - light.position[0]);
 
+   // corners must be sorted by their angles in ascending order.
    let corners = [
-      [angle_bl, bbox.left,  bbox.bottom, 0.0, 0.0],
-      [angle_br, bbox.right, bbox.bottom, 0.0, 0.0],
-      [angle_tl, bbox.left,  bbox.top,    0.0, 0.0],
-      [angle_tr, bbox.right, bbox.top,    0.0, 0.0]
+      {angle: angle_bl, point: [bbox.left,  bbox.bottom]},
+      {angle: angle_br, point: [bbox.right, bbox.bottom]},
+      {angle: angle_tl, point: [bbox.left,  bbox.top]},
+      {angle: angle_tr, point: [bbox.right, bbox.top]}
    ];
-   corners.sort((a,b) => a[0]-b[0]);
+   corners.sort((a,b) => a.angle - b.angle);
 
 
 
    let arr = [
-      edge_pt1[0], edge_pt1[1], 0.0, 0.0,
-      edge_pt2[0], edge_pt2[1], 0.0, 0.0,
-      bbox_pt1[0], bbox_pt1[1], du1, dv1,
-      edge_pt2[0], edge_pt2[1], 0.0, 0.0,
-      bbox_pt1[0], bbox_pt1[1], du1, dv1,
-      bbox_pt2[0], bbox_pt2[1], du2, dv2,
+      edge_pt1[0], edge_pt1[1], 0.0,
+      edge_pt2[0], edge_pt2[1], 0.0,
+      bbox_pt1[0], bbox_pt1[1], 0.0,
+      edge_pt2[0], edge_pt2[1], 0.0,
+      bbox_pt1[0], bbox_pt1[1], 0.0,
+      bbox_pt2[0], bbox_pt2[1], 0.0
    ];
    if (angle2 - angle1 < Math.PI) {
       for (let corner of corners) {
-         if (angle1 < corner[0] && corner[0] < angle2) {
-            arr = arr.concat(arr.slice(-8), corner.slice(1));
+         if (angle1 < corner.angle && corner.angle < angle2) {
+            arr = arr.concat(arr.slice(-6), corner.point, [0.0]);
          }
       }
    } else {
       for (let corner of corners) {
-         if (angle1 > corner[0] || corner[0] > angle2) {
-            arr = arr.concat(arr.slice(-8), corner.slice(1));
+         if (angle1 > corner.angle || corner.angle > angle2) {
+            arr = arr.concat(arr.slice(-6), corner.point, [0.0]);
          }
       }
    }
@@ -800,6 +831,41 @@ function projectEdge(add_geometry_func, edge, light, camera_bbox) {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+function sharpenShadow(add_geometry_func, edge_pt) {
+   let radius = 1;
+   let count = 8;
+
+   let geometry = [];
+   let dx1 = radius;
+   let dy1 = 0;
+   let angle = 0;
+   let delta = 2*Math.PI / count;
+   while (count > 0) {
+      count -= 1;
+      angle += delta;
+      let dx2 =  Math.cos(angle) * radius;
+      let dy2 = -Math.sin(angle) * radius;
+      geometry = geometry.concat([
+         edge_pt[0],     edge_pt[1],     0.0,
+         edge_pt[0]+dx1, edge_pt[1]+dy1, 1.0,
+         edge_pt[0]+dx2, edge_pt[1]+dy2, 1.0
+      ]);
+      dx1 = dx2;
+      dy1 = dy2;
+   }
+   add_geometry_func(geometry);
+}
 
 
 
