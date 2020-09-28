@@ -119,13 +119,17 @@ const default_fragment_shader = `
 
       float rng = 0.0;
       float shadow = 0.0;
-      float ds = 0.005 * shadow_texel.s;
-      float dt = 0.010 * shadow_texel.t;
       float s0 = v_texcoord_shadow.s;
       float t0 = v_texcoord_shadow.t;
 
-      for (float i = -2.0; i < 2.0; i += 1.0) {
-         for (float j = -2.0; j < 2.0; j += 1.0) {
+      // Read and downscale the texture coordinate deltas.
+      float ds = shadow_texel.s / 8.0;
+      float dt = shadow_texel.t / 8.0;
+
+      // Sample the shadow map multiple times with the "spread" defined by the
+      // texture coordinate deltas. Using randomness prevents visible strips.
+      for (float i = -1.0; i < 1.0; i += 0.5) {
+         for (float j = -1.0; j < 1.0; j += 0.5) {
             rng = fract(rng * random_texel[0] + random_texel[1]);
             float s = s0 + ds*i + ds*rng;
             rng = fract(rng * random_texel[2] + random_texel[3]);
@@ -134,11 +138,9 @@ const default_fragment_shader = `
          }
       }
 
-      shadow /= 16.0;
-      shadow = 1.0 - shadow;
+      // Calculate the final shadow value.
+      shadow = 1.0 - (shadow / 16.0);
       shadow = pow(shadow, u_gamma);
-
-
 
       // Calculate base color from the ambient value and diffuse texel.
       vec3 color = c_ambient * diffuse_texel.rgb;
@@ -242,15 +244,15 @@ function DefaultShader(gl) {
 //==============================================================================
 
 const shadow_vertex_shader = `
-   attribute vec3 a_position;
+   attribute vec4 a_vertex_info;
    uniform mat3 u_model_matrix;
    uniform mat3 u_camera_matrix;
    varying vec4 v_color;
 
    void main(void) {
-      vec3 position = vec3(a_position.xy, 1.0);
-      v_color = vec4(a_position.zzz, 1.0);
-      gl_Position = vec4((u_camera_matrix * u_model_matrix * position).xy, a_position.z, 1.0);
+      vec3 position = vec3(a_vertex_info.xy, 1.0);
+      v_color = vec4(a_vertex_info.z, a_vertex_info.w, 0.0, 1.0);
+      gl_Position = vec4((u_camera_matrix * u_model_matrix * position).xy, a_vertex_info.z, 1.0);
    }
 `;
 
@@ -265,16 +267,16 @@ const shadow_fragment_shader = `
 
 function ShadowShader(gl) {
    let prog = buildShaderProgram(gl, shadow_vertex_shader, shadow_fragment_shader);
-   let loc_position      = gl.getAttribLocation(prog, 'a_position');
+   let loc_vertex_info   = gl.getAttribLocation(prog, 'a_vertex_info');
    let loc_model_matrix  = gl.getUniformLocation(prog, 'u_model_matrix');
    let loc_camera_matrix = gl.getUniformLocation(prog, 'u_camera_matrix');
    this.enable = function () {
       gl.useProgram(prog);
-      gl.enableVertexAttribArray(loc_position);
+      gl.enableVertexAttribArray(loc_vertex_info);
    };
-   this.setupGeometry = function (buf_position) {
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf_position);
-      gl.vertexAttribPointer(loc_position, 3, gl.FLOAT, false, 0, 0);
+   this.setupGeometry = function (buf_vertex_info) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf_vertex_info);
+      gl.vertexAttribPointer(loc_vertex_info, 4, gl.FLOAT, false, 0, 0);
    };
    this.setupModel = function (matrix) {
       gl.uniformMatrix3fv(loc_model_matrix, false, matrix);
@@ -421,7 +423,7 @@ TextureFromRandomBytes.prototype.bindTo = function (index) {
 
 //==============================================================================
 
-function Framebuffer(gl, width, height) {
+function TextureFramebuffer(gl, width, height) {
    let texture = new TextureFromPixels(gl, width, height, null);
 
    let depthbuf_id = gl.createRenderbuffer();
@@ -439,6 +441,62 @@ function Framebuffer(gl, width, height) {
    };
    this.bindTextureTo = function (index) {
       texture.bindTo(index);
+   };
+}
+
+function CanvasFramebuffer(gl, canvas) {
+   this.bind = function () {
+      let cw = canvas.clientWidth;
+      let ch = canvas.clientHeight;
+      if ((canvas.width != cw) || (canvas.height != ch)) {
+         canvas.width  = cw;
+         canvas.height = ch;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, cw, ch);
+   };
+   this.getAspectRatio = function () {
+      return (canvas.clientWidth / canvas.clientHeight);
+   };
+   // Return a rectangle with pixel dimensions of the canvas.
+   // Unlike the webgl coordinates, the vertical axis goes downwards.
+   this.getBoundingRect = function () {
+      return canvas.getBoundingClientRect();
+   };
+}
+
+function Camera(canvas_framebuf, min_width, min_height) {
+   let position    = [0,0,0];
+   let matrix      = null;
+   let view_width  = null;
+   let view_height = null;
+
+   this.getPosition    = function () {return position;};
+   this.getMatrix      = function () {return matrix;};
+   this.getViewWidth   = function () {return view_width;};
+   this.getViewHeight  = function () {return view_height;};
+   this.getBoundingBox = function () {
+      return {
+         left:   position[0] - view_width/2,
+         right:  position[0] + view_width/2,
+         bottom: position[1] - view_height/2,
+         top:    position[1] + view_height/2
+      };
+   };
+   this.setPosition = function (pos) {
+      let ratio = canvas_framebuf.getAspectRatio();
+      if ((min_width / min_height) < ratio) {
+         view_width  = min_height * ratio;
+         view_height = min_height;
+      } else {
+         view_width  = min_width;
+         view_height = min_width / ratio;
+      }
+      matrix = Matrix3.multiply(
+         Matrix3.scale(2.0 / view_width, 2.0 / view_height),
+         Matrix3.translation(-pos[0], -pos[1])
+      );
+      position = pos;
    };
 }
 
@@ -664,13 +722,7 @@ Map.prototype.draw = function (shader, camera) {
    buf.count = 0;
 }
 
-
-
-
-
-
-
-Map.prototype.drawShadowMapAlpha = function (shader, camera, light) {
+Map.prototype.drawShadowMap = function (shader, camera, light, cast_shadow_func) {
    let gl = this.glcontext;
    let buf = this.shadow_buffer;
    let bbox = camera.getBoundingBox();
@@ -679,194 +731,126 @@ Map.prototype.drawShadowMapAlpha = function (shader, camera, light) {
       buf.count += arr.length;
    };
    let collect_edge = function (node) {
-      castShadow(add_geometry, light, node, bbox);
+      cast_shadow_func(add_geometry, light.position, node.pt1, node.pt2, bbox);
    };
    gl.bindBuffer(gl.ARRAY_BUFFER, buf.id);
    this.entities_root.traverse(collect_edge, bbox);
    shader.setupGeometry(buf.id);
-   gl.drawArrays(gl.TRIANGLES, 0, buf.count / 3); // Each vertex has 3 components.
+   gl.drawArrays(gl.TRIANGLES, 0, buf.count / 4); // Each vertex has 4 components.
    buf.count = 0;
 }
 
-Map.prototype.drawShadowMapColor = function (shader, camera, light) {
-   let gl = this.glcontext;
-   let buf = this.shadow_buffer;
-   let bbox = camera.getBoundingBox();
-   let add_geometry = function (arr) {
-      gl.bufferSubData(gl.ARRAY_BUFFER, (buf.count * 4), new Float32Array(arr));
-      buf.count += arr.length;
-   };
-   let collect_edge = function (node) {
-      sharpenShadow(add_geometry, node.pt1);
-      sharpenShadow(add_geometry, node.pt2);
-   };
-   gl.bindBuffer(gl.ARRAY_BUFFER, buf.id);
-   this.entities_root.traverse(collect_edge, bbox);
-   shader.setupGeometry(buf.id);
-   gl.drawArrays(gl.TRIANGLES, 0, buf.count / 3); // Each vertex has 3 components.
-   buf.count = 0;
-}
+//==============================================================================
 
-
-
-
-
-
-
-
-
-
-
-/* Results of atan2(y,x) converted to degrees:
- *    
- *     135    90    45
- *           y ^
- *             |
- *     180 ----+---> 0
- *             |   x
- *             |
- *    -135   -90   -45
- */
-
-// Project a point at the specified angle into one of line segments
-// of a bounding box. The point must be within the bounding box.
-// The angle must be in range (-pi, pi].
-function projectPoint(point, angle, bbox) {
-   let x = 0;
-   let y = 0;
-   let tg = Math.tan(angle);
-   if (angle >= 0) {
-      x = point[0] + (bbox.top - point[1]) / tg;
-      y = bbox.top;
-   } else {
-      x = point[0] + (bbox.bottom - point[1]) / tg;
-      y = bbox.bottom;
-   }
-   if (x > bbox.right) {
-      x = bbox.right;
-      y = point[1] + (bbox.right - point[0]) * tg;
-   } else if (x < bbox.left) {
-      x = bbox.left;
-      y = point[1] + (bbox.left - point[0]) * tg;
-   }
-   return [x, y];
-}
-
-
-
-
-
-function castShadow(add_geometry_func, light, edge, camera_bbox) {
-   let edge_pt1 = edge.pt1;
-   let edge_pt2 = edge.pt2;
-   // Calculate angles for shadows casted from points of the edge.
-   let angle1 = Math.atan2(edge_pt1[1] - light.position[1], edge_pt1[0] - light.position[0]);
-   let angle2 = Math.atan2(edge_pt2[1] - light.position[1], edge_pt2[0] - light.position[0]);
-   // Make sure that '1' identifies the angle of lesser value.
-   if (angle1 > angle2) {
-      let a = angle1;
-      angle1 = angle2;
-      angle2 = a;
-      edge_pt1 = edge.pt2;
-      edge_pt2 = edge.pt1;
-   }
-
-   // TODO: Precalculate
-   // Make sure the bounding box is large enough, but don't modify the original one.
-   let bbox = {
-      left:   Math.min(camera_bbox.left,   edge_pt1[0], edge_pt2[0]),
-      right:  Math.max(camera_bbox.right,  edge_pt1[0], edge_pt2[0]),
-      bottom: Math.min(camera_bbox.bottom, edge_pt1[1], edge_pt2[1]),
-      top:    Math.max(camera_bbox.top,    edge_pt1[1], edge_pt2[1])
-   };
-   // Project edge points into the bounding box.
-   let bbox_pt1 = projectPoint(edge_pt1, angle1, bbox);
-   let bbox_pt2 = projectPoint(edge_pt2, angle2, bbox);
-
-
-
-
-   // TODO: Precalculate
-   let angle_bl = Math.atan2(bbox.bottom - light.position[1], bbox.left  - light.position[0]);
-   let angle_br = Math.atan2(bbox.bottom - light.position[1], bbox.right - light.position[0]);
-   let angle_tl = Math.atan2(bbox.top    - light.position[1], bbox.left  - light.position[0]);
-   let angle_tr = Math.atan2(bbox.top    - light.position[1], bbox.right - light.position[0]);
-
-   // corners must be sorted by their angles in ascending order.
-   let corners = [
-      {angle: angle_bl, point: [bbox.left,  bbox.bottom]},
-      {angle: angle_br, point: [bbox.right, bbox.bottom]},
-      {angle: angle_tl, point: [bbox.left,  bbox.top]},
-      {angle: angle_tr, point: [bbox.right, bbox.top]}
-   ];
-   corners.sort((a,b) => a.angle - b.angle);
-
-
-
-   let arr = [
-      edge_pt1[0], edge_pt1[1], 0.0,
-      edge_pt2[0], edge_pt2[1], 0.0,
-      bbox_pt1[0], bbox_pt1[1], 0.0,
-      edge_pt2[0], edge_pt2[1], 0.0,
-      bbox_pt1[0], bbox_pt1[1], 0.0,
-      bbox_pt2[0], bbox_pt2[1], 0.0
-   ];
-   if (angle2 - angle1 < Math.PI) {
-      for (let corner of corners) {
-         if (angle1 < corner.angle && corner.angle < angle2) {
-            arr = arr.concat(arr.slice(-6), corner.point, [0.0]);
-         }
+function castShadowAlpha(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera_bbox) {
+   let angle1 = Math.atan2(edge_pt1[1] - light_pt[1], edge_pt1[0] - light_pt[0]);
+   let angle2 = Math.atan2(edge_pt2[1] - light_pt[1], edge_pt2[0] - light_pt[0]);
+   let angle = angleAverage(angle1, angle2);
+   // If the shadow angles are too wide then divide the edge into two parts and process
+   // each part separately. This is to avoid drawing very large triangles.
+   if (angleDifference(angle1, angle2) > Math.PI/2) {
+      let l1 = lineFromTwoPoints(edge_pt1, edge_pt2);
+      let l2 = lineFromPointAndAngle(light_pt, angle);
+      let pt = lineIntersection(l1, l2);
+      if (pt) {
+         castShadowAlpha(add_geometry_func, light_pt, edge_pt1, pt, camera_bbox);
+         castShadowAlpha(add_geometry_func, light_pt, edge_pt2, pt, camera_bbox);
       }
    } else {
-      for (let corner of corners) {
-         if (angle1 > corner.angle || corner.angle > angle2) {
-            arr = arr.concat(arr.slice(-6), corner.point, [0.0]);
-         }
+      // Make sure the bounding box is large enough, but don't modify the original one.
+      let bbox = {
+         left:   Math.min(camera_bbox.left,   edge_pt1[0], edge_pt2[0]),
+         right:  Math.max(camera_bbox.right,  edge_pt1[0], edge_pt2[0]),
+         bottom: Math.min(camera_bbox.bottom, edge_pt1[1], edge_pt2[1]),
+         top:    Math.max(camera_bbox.top,    edge_pt1[1], edge_pt2[1])
+      };
+      // Cast the edge points along the shadow angles onto the precalculated line.
+      // This line is outside of the bounding box and is perpendicular to the average
+      // of the shadow angles. That way we don't need to handle corners of the bounding
+      // box when drawing the shadow.
+      let l0 = linePerpendicularToAngleOutsideOfBbox(angle, bbox);
+      let l1 = lineFromPointAndAngle(edge_pt1, angle1);
+      let l2 = lineFromPointAndAngle(edge_pt2, angle2);
+      let pt1 = lineIntersection(l0, l1);
+      let pt2 = lineIntersection(l0, l2);
+      if (pt1 && pt2) {
+         add_geometry_func([
+            edge_pt1[0], edge_pt1[1], 0.0, 0.0,
+            edge_pt2[0], edge_pt2[1], 0.0, 0.0,
+            pt1[0],      pt1[1],      0.0, 0.0,
+            edge_pt2[0], edge_pt2[1], 0.0, 0.0,
+            pt1[0],      pt1[1],      0.0, 0.0,
+            pt2[0],      pt2[1],      0.0, 0.0
+         ]);
       }
    }
-
-   add_geometry_func(arr);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-function sharpenShadow(add_geometry_func, edge_pt) {
-   let radius = 1;
-   let count = 8;
-
-   let geometry = [];
-   let dx1 = radius;
-   let dy1 = 0;
-   let angle = 0;
-   let delta = 2*Math.PI / count;
-   while (count > 0) {
-      count -= 1;
-      angle += delta;
-      let dx2 =  Math.cos(angle) * radius;
-      let dy2 = -Math.sin(angle) * radius;
-      geometry = geometry.concat([
-         edge_pt[0],     edge_pt[1],     0.0,
-         edge_pt[0]+dx1, edge_pt[1]+dy1, 1.0,
-         edge_pt[0]+dx2, edge_pt[1]+dy2, 1.0
-      ]);
-      dx1 = dx2;
-      dy1 = dy2;
+function castShadowColor(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera_bbox) {
+   let angle1 = Math.atan2(edge_pt1[1] - light_pt[1], edge_pt1[0] - light_pt[0]);
+   let angle2 = Math.atan2(edge_pt2[1] - light_pt[1], edge_pt2[0] - light_pt[0]);
+   let angle = angleAverage(angle1, angle2);
+   if (angleDifference(angle1, angle2) > Math.PI/2) {
+      let l1 = lineFromTwoPoints(edge_pt1, edge_pt2);
+      let l2 = lineFromPointAndAngle(light_pt, angle);
+      let pt = lineIntersection(l1, l2);
+      if (pt) {
+         castShadowColor(add_geometry_func, light_pt, edge_pt1, pt, camera_bbox);
+         castShadowColor(add_geometry_func, light_pt, edge_pt2, pt, camera_bbox);
+      }
+   } else {
+      let bbox = {
+         left:   Math.min(camera_bbox.left,   edge_pt1[0], edge_pt2[0]),
+         right:  Math.max(camera_bbox.right,  edge_pt1[0], edge_pt2[0]),
+         bottom: Math.min(camera_bbox.bottom, edge_pt1[1], edge_pt2[1]),
+         top:    Math.max(camera_bbox.top,    edge_pt1[1], edge_pt2[1])
+      };
+      // Make sure that "1" identifies the angle of lesser value.
+      if (angle1 > angle2) {
+         let swap = angle1;
+         angle1 = angle2;
+         angle2 = swap;
+         swap = edge_pt1;
+         edge_pt1 = edge_pt2;
+         edge_pt2 = swap;
+      }
+      // The angle below specifies the area near the borders of a shadow where the shadow
+      // will be "soft". We need to make the drawn geometry wider to include this entire area.
+      const delta_angle = 5.0 * Math.PI/180.0;
+      angle1 -= delta_angle;
+      angle2 += delta_angle;
+      // Make sure that the updated angles are in the correct range.
+      if (angle1 <= -Math.PI) angle1 += 2*Math.PI;
+      if (angle2 >   Math.PI) angle2 -= 2*Math.PI;
+      // Cast the edge points onto the line outside of the
+      // bounding box and perpendicular to the average angle.
+      let l0 = linePerpendicularToAngleOutsideOfBbox(angle, bbox);
+      let l1 = lineFromPointAndAngle(edge_pt1, angle1);
+      let l2 = lineFromPointAndAngle(edge_pt2, angle2);
+      let pt1 = lineIntersection(l0, l1);
+      let pt2 = lineIntersection(l0, l2);
+      if (pt1 && pt2) {
+         // Calculate the "spread" of the shadow map sampling which implements soft shadows.
+         // This spread will be saved as texture coordinate deltas in the shadow map color components.
+         let cam_width  = camera_bbox.right - camera_bbox.left;
+         let cam_height = camera_bbox.top - camera_bbox.bottom;
+         let delta_tan  = Math.tan(delta_angle);
+         let dist1 = distanceBetweenTwoPoints(edge_pt1, pt1);
+         let dist2 = distanceBetweenTwoPoints(edge_pt2, pt2);
+         // Upscale the texture coordinate deltas for better usage of the color range.
+         // The upscale factor needs to be consistent with the fragment shader.
+         let ds1 = 8.0 * dist1 * delta_tan / cam_width;
+         let ds2 = 8.0 * dist2 * delta_tan / cam_width;
+         let dt1 = 8.0 * dist1 * delta_tan / cam_height;
+         let dt2 = 8.0 * dist2 * delta_tan / cam_height;
+         add_geometry_func([
+            edge_pt1[0], edge_pt1[1], 0.0, 0.0,
+            edge_pt2[0], edge_pt2[1], 0.0, 0.0,
+            pt1[0],      pt1[1],      ds1, dt1,
+            edge_pt2[0], edge_pt2[1], 0.0, 0.0,
+            pt1[0],      pt1[1],      ds1, dt1,
+            pt2[0],      pt2[1],      ds2, dt2
+         ]);
+      }
    }
-   add_geometry_func(geometry);
 }
-
-
-
-
