@@ -98,6 +98,7 @@ const default_fragment_shader = `
    uniform sampler2D u_random_map;
    uniform vec3  u_camera_position;
    uniform vec3  u_light_position;
+   uniform vec3  u_light_target;
    uniform float u_light_attenuation;
    uniform float u_gamma;
    varying vec2  v_texcoord;
@@ -108,6 +109,8 @@ const default_fragment_shader = `
    varying vec3  v_position;
    const float c_ambient = 0.001;
    const float c_shininess = 64.0;
+   const float c_inner_cutoff = 0.866; // cos(30 deg)
+   const float c_outer_cutoff = 0.707; // cos(45 deg)
 
    void main(void) {
       // Read texels from textures.
@@ -130,9 +133,9 @@ const default_fragment_shader = `
       // texture coordinate deltas. Using randomness prevents visible strips.
       for (float i = -1.0; i < 1.0; i += 0.5) {
          for (float j = -1.0; j < 1.0; j += 0.5) {
-            rng = fract(rng * random_texel[0] + random_texel[1]);
+            rng = mod(rng * random_texel[0] + random_texel[1], 0.5);
             float s = s0 + ds*i + ds*rng;
-            rng = fract(rng * random_texel[2] + random_texel[3]);
+            rng = mod(rng * random_texel[2] + random_texel[3], 0.5);
             float t = t0 + dt*j + dt*rng;
             shadow += texture2D(u_shadow_map, vec2(s,t)).a;
          }
@@ -169,6 +172,12 @@ const default_fragment_shader = `
       float diffuse = max(dot(normal, to_light), 0.0);
       float specular = pow(max(dot(normal, halfway), 0.0), c_shininess);
 
+      // Calculate cosine of angle between light vector and light direction.
+      float theta = dot(to_light, normalize(u_light_position - u_light_target));
+
+      // Scale luminosity based on whether this fragment is within the spotlight cone.
+      luminosity *= clamp((theta - c_outer_cutoff) / (c_inner_cutoff - c_outer_cutoff), 0.0, 1.0);
+
       // Add diffuse and specular colors to the final color.
       color += shadow * luminosity * ((diffuse * diffuse_texel.rgb) + (specular * specular_texel.rgb));
 
@@ -192,6 +201,7 @@ function DefaultShader(gl) {
    let loc_camera_matrix = gl.getUniformLocation(prog, 'u_camera_matrix');
    let loc_camera_pos    = gl.getUniformLocation(prog, 'u_camera_position');
    let loc_light_pos     = gl.getUniformLocation(prog, 'u_light_position');
+   let loc_light_target  = gl.getUniformLocation(prog, 'u_light_target');
    let loc_light_att     = gl.getUniformLocation(prog, 'u_light_attenuation');
    let loc_gamma         = gl.getUniformLocation(prog, 'u_gamma');
    let loc_diffuse_map   = gl.getUniformLocation(prog, 'u_diffuse_map');
@@ -232,8 +242,9 @@ function DefaultShader(gl) {
       gl.uniformMatrix3fv(loc_camera_matrix, false, matrix);
       gl.uniform3fv(loc_camera_pos, position);
    };
-   this.setupLight = function (position, attenuation) {
+   this.setupLight = function (position, target, attenuation) {
       gl.uniform3fv(loc_light_pos, position);
+      gl.uniform3fv(loc_light_target, target);
       gl.uniform1f(loc_light_att, attenuation);
    };
    this.setupGamma = function (gamma) {
@@ -806,7 +817,8 @@ function castShadowColor(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera
          top:    Math.max(camera_bbox.top,    edge_pt1[1], edge_pt2[1])
       };
       // Make sure that "1" identifies the angle of lesser value.
-      if (angle1 > angle2) {
+      if ((angle1 > angle2 && angle1 - angle2 < Math.PI) ||
+          (angle2 > angle1 && angle2 - angle1 > Math.PI)) {
          let swap = angle1;
          angle1 = angle2;
          angle2 = swap;
