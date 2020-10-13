@@ -99,7 +99,7 @@ const default_fragment_shader = `
    uniform vec3  u_camera_position;
    uniform vec3  u_light_position;
    uniform vec3  u_light_target;
-   uniform float u_light_attenuation;
+   uniform vec2  u_light_attenuation;
    uniform float u_gamma;
    varying vec2  v_texcoord;
    varying vec2  v_texcoord_shadow;
@@ -164,19 +164,24 @@ const default_fragment_shader = `
       vec3 to_light = normalize(u_light_position - v_position);
       vec3 halfway = normalize(to_light + to_camera);
 
-      // Calculate luminosity based on the light distance and its attenuation.
-      float distance = length(u_light_position - v_position);
-      float luminosity = 1.0 / (1.0 + u_light_attenuation * distance * distance);
-
       // Calculate diffuse and specular scalars.
       float diffuse = max(dot(normal, to_light), 0.0);
       float specular = pow(max(dot(normal, halfway), 0.0), c_shininess);
 
+      // Calculate luminosity values based on the light distance and its attenuation.
+      float distance = length(u_light_position - v_position);
+      float luminosity_point = 1.0 / (1.0 + u_light_attenuation[0] * distance * distance);
+      float luminosity_spot  = 1.0 / (1.0 + u_light_attenuation[1] * distance * distance);
+
       // Calculate cosine of angle between light vector and light direction.
       float theta = dot(to_light, normalize(u_light_position - u_light_target));
 
-      // Scale luminosity based on whether this fragment is within the spotlight cone.
-      luminosity *= clamp((theta - c_outer_cutoff) / (c_inner_cutoff - c_outer_cutoff), 0.0, 1.0);
+      // Scale spotlight luminosity based on whether this fragment is within the spotlight cone.
+      float intensity = clamp((theta - c_outer_cutoff) / (c_inner_cutoff - c_outer_cutoff), 0.0, 1.0);
+      luminosity_spot *= intensity * intensity;
+
+      // Final luminosity.
+      float luminosity = max(luminosity_point, luminosity_spot);
 
       // Add diffuse and specular colors to the final color.
       color += shadow * luminosity * ((diffuse * diffuse_texel.rgb) + (specular * specular_texel.rgb));
@@ -245,7 +250,7 @@ function DefaultShader(gl) {
    this.setupLight = function (position, target, attenuation) {
       gl.uniform3fv(loc_light_pos, position);
       gl.uniform3fv(loc_light_target, target);
-      gl.uniform1f(loc_light_att, attenuation);
+      gl.uniform2fv(loc_light_att, attenuation);
    };
    this.setupGamma = function (gamma) {
       gl.uniform1f(loc_gamma, gamma);
@@ -577,15 +582,17 @@ function ElementArrayBuffer(gl, array) {
 function DynamicArrayBuffer(gl, maxsize) {
    this.id = gl.createBuffer();
    this.count = 0;
+   this.maxsize = maxsize;
    gl.bindBuffer(gl.ARRAY_BUFFER, this.id);
-   gl.bufferData(gl.ARRAY_BUFFER, maxsize, gl.DYNAMIC_DRAW);
+   gl.bufferData(gl.ARRAY_BUFFER, this.maxsize, gl.DYNAMIC_DRAW);
 }
 
 function DynamicElementArrayBuffer(gl, maxsize) {
    this.id = gl.createBuffer();
    this.count = 0;
+   this.maxsize = maxsize;
    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.id);
-   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, maxsize, gl.DYNAMIC_DRAW);
+   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, this.maxsize, gl.DYNAMIC_DRAW);
 }
 
 //==============================================================================
@@ -627,72 +634,6 @@ Model.prototype.draw = function (shader, anim_name, anim_pos) {
 
 //==============================================================================
 
-function traverseBranch(func, bbox) {
-   let sub1 = this.sub1;
-   let sub2 = this.sub2;
-   if (bbox) {
-      if ((sub1.right > bbox.left) && (sub1.left < bbox.right) && (sub1.top > bbox.bottom) && (sub1.bottom < bbox.top)) {
-         if ((sub1.left >= bbox.left) && (sub1.right <= bbox.right) && (sub1.bottom >= bbox.bottom) && (sub1.top <= bbox.top)) {
-            sub1.traverse(func, null);
-         } else {
-            sub1.traverse(func, bbox);
-         }
-      }
-      if ((sub2.right > bbox.left) && (sub2.left < bbox.right) && (sub2.top > bbox.bottom) && (sub2.bottom < bbox.top)) {
-         if ((sub2.left >= bbox.left) && (sub2.right <= bbox.right) && (sub2.bottom >= bbox.bottom) && (sub2.top <= bbox.top)) {
-            sub2.traverse(func, null);
-         } else {
-            sub2.traverse(func, bbox);
-         }
-      }
-   } else {
-      sub1.traverse(func, null);
-      sub2.traverse(func, null);
-   }
-}
-
-function traverseLeaf(func, bbox) {
-   func(this);
-}
-
-function EntityNode(json_node, vertices) {
-   this.left   = json_node['bbox'][0];
-   this.right  = json_node['bbox'][1];
-   this.bottom = json_node['bbox'][2];
-   this.top    = json_node['bbox'][3];
-   if (json_node['kind'] == 'branch') {
-      this.traverse = traverseBranch;
-      this.sub1 = new EntityNode(json_node['sub1'], vertices);
-      this.sub2 = new EntityNode(json_node['sub2'], vertices);
-   } else {
-      this.traverse = traverseLeaf;
-      let indexes = json_node['value'];
-      if (json_node['kind'] == 'edge') {
-         this.pt1 = vertices[indexes[0]];
-         this.pt2 = vertices[indexes[1]];
-      }
-   }
-}
-
-function PolygonNode(json_node) {
-   this.left   = json_node['bbox'][0];
-   this.right  = json_node['bbox'][1];
-   this.bottom = json_node['bbox'][2];
-   this.top    = json_node['bbox'][3];
-   if (json_node['kind'] == 'branch') {
-      this.traverse = traverseBranch;
-      this.sub1 = new PolygonNode(json_node['sub1']);
-      this.sub2 = new PolygonNode(json_node['sub2']);
-   } else {
-      this.traverse = traverseLeaf;
-      if (json_node['kind'] == 'polygon') {
-         this.arr = new Uint16Array(json_node['value']);
-      }
-   }
-}
-
-//==============================================================================
-
 function getPolygons(json_node) {
    let polygons = [];
    if (json_node['kind'] == 'polygon') {
@@ -704,51 +645,86 @@ function getPolygons(json_node) {
    return polygons;
 }
 
-function Map(gl, json) {
-   let entities  = json['entities'];
+function MapRenderer(gl, json) {
    let polygons  = json['polygons'];
    let texcoords = json['texcoords'];
    let vertices  = json['vertices'];
    this.glcontext = gl;
-   this.entities_root = new EntityNode(entities, vertices);
-   this.polygons_root = new PolygonNode(polygons);
    this.texcoord_buffer = new ArrayBuffer(gl, texcoords);
    this.tangent_buffer = new ArrayBuffer(gl, calculateTangents(getPolygons(polygons), texcoords, vertices));
    this.vertex_buffer = new ArrayBuffer(gl, vertices);
-   this.index_buffer = new DynamicElementArrayBuffer(gl, 4*1024);
+   this.index_buffer = new DynamicElementArrayBuffer(gl, 64*1024);
    this.shadow_buffer = new DynamicArrayBuffer(gl, 256*1024);
 }
 
-Map.prototype.draw = function (shader, camera) {
+MapRenderer.prototype.draw = function (polygons, shader, camera) {
    let gl = this.glcontext;
    let buf = this.index_buffer;
-   let collect_polygon = function (node) {
-      gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, (buf.count * 2), node.arr);
-      buf.count += node.arr.length;
+   let flush_buffer = function () {
+      gl.drawElements(gl.TRIANGLES, buf.count, gl.UNSIGNED_SHORT, 0);
+      buf.count = 0;
    };
-   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.id);
-   this.polygons_root.traverse(collect_polygon, camera.getBoundingBox());
+   let add_geometry = function (index_array) {
+      if ((buf.count + index_array.length) * 2 > buf.maxsize) { // 2 bytes per value (Uint16).
+         flush_buffer();
+      }
+      gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, (buf.count * 2), new Uint16Array(index_array));
+      buf.count += index_array.length;
+   };
    shader.setupGeometry(this.texcoord_buffer.id, this.tangent_buffer.id, this.tangent_buffer.id, this.vertex_buffer.id, this.vertex_buffer.id, 0);
-   gl.drawElements(gl.TRIANGLES, buf.count, gl.UNSIGNED_SHORT, 0);
-   buf.count = 0;
+   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.id);
+   // WebGL setup.
+   gl.enable(gl.DEPTH_TEST);
+   gl.depthFunc(gl.LESS);
+   gl.clearColor(0.0, 0.0, 0.0, 1.0);
+   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+   // Draw.
+   for (let node of polygons) {
+      add_geometry(node.index_array);
+   }
+   flush_buffer();
+   // WebGL cleanup.
+   gl.disable(gl.DEPTH_TEST);
 }
 
-Map.prototype.drawShadowMap = function (shader, camera, light, cast_shadow_func) {
+MapRenderer.prototype.drawShadowMap = function (shadow_casters, shader, camera, light) {
    let gl = this.glcontext;
    let buf = this.shadow_buffer;
-   let bbox = camera.getBoundingBox();
-   let add_geometry = function (arr) {
-      gl.bufferSubData(gl.ARRAY_BUFFER, (buf.count * 4), new Float32Array(arr));
-      buf.count += arr.length;
+   let flush_buffer = function () {
+      gl.drawArrays(gl.TRIANGLES, 0, buf.count / 4); // Each vertex has 4 components.
+      buf.count = 0;
    };
-   let collect_edge = function (node) {
-      cast_shadow_func(add_geometry, light.position, node.pt1, node.pt2, bbox);
+   let add_geometry = function (vertex_array) {
+      if ((buf.count + vertex_array.length) * 4 > buf.maxsize) { // 4 bytes per value (Float32).
+         flush_buffer();
+      }
+      gl.bufferSubData(gl.ARRAY_BUFFER, (buf.count * 4), new Float32Array(vertex_array));
+      buf.count += vertex_array.length;
    };
-   gl.bindBuffer(gl.ARRAY_BUFFER, buf.id);
-   this.entities_root.traverse(collect_edge, bbox);
    shader.setupGeometry(buf.id);
-   gl.drawArrays(gl.TRIANGLES, 0, buf.count / 4); // Each vertex has 4 components.
-   buf.count = 0;
+   // WebGL setup.
+   gl.enable(gl.BLEND);
+   gl.enable(gl.DEPTH_TEST);
+   gl.depthFunc(gl.LESS);
+   gl.clearColor(0.0, 0.0, 0.0, 0.0);
+   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+   // Draw alpha component only (not RGB).
+   gl.blendFuncSeparate(gl.ZERO, gl.ONE, gl.ONE, gl.ZERO);
+   for (let node of shadow_casters) {
+      castShadowAlpha(add_geometry, light.position, node.pt1, node.pt2, camera.getBoundingBox());
+   }
+   flush_buffer();
+   // Clear depth buffer before the next pass.
+   gl.clear(gl.DEPTH_BUFFER_BIT);
+   // Draw RGB components only (not alpha).
+   gl.blendFuncSeparate(gl.ONE, gl.ZERO, gl.ZERO, gl.ONE);
+   for (let node of shadow_casters) {
+      castShadowColor(add_geometry, light.position, node.pt1, node.pt2, camera.getBoundingBox());
+   }
+   flush_buffer();
+   // WebGL cleanup.
+   gl.disable(gl.DEPTH_TEST);
+   gl.disable(gl.BLEND);
 }
 
 //==============================================================================
