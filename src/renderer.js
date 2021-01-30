@@ -482,24 +482,21 @@ function CanvasFramebuffer(gl, canvas) {
 }
 
 function Camera(canvas_framebuf, min_width, min_height) {
-   let position    = [0,0,0];
-   let matrix      = null;
-   let view_width  = null;
+   let camera_angle = 0;
+   let camera_pos = [0,0,0];
+   let view_width = null;
    let view_height = null;
 
-   this.getPosition    = function () {return position;};
-   this.getMatrix      = function () {return matrix;};
-   this.getViewWidth   = function () {return view_width;};
-   this.getViewHeight  = function () {return view_height;};
-   this.getBoundingBox = function () {
-      return {
-         left:   position[0] - view_width/2,
-         right:  position[0] + view_width/2,
-         bottom: position[1] - view_height/2,
-         top:    position[1] + view_height/2
-      };
+   this.setAngle = function (angle) {
+      camera_angle = angle;
    };
-   this.setPosition = function (pos) {
+   this.setPosition = function (position) {
+      camera_pos = position;
+   };
+   this.getPosition = function () {
+      return camera_pos;
+   };
+   this.getMatrix = function () {
       let ratio = canvas_framebuf.getAspectRatio();
       if ((min_width / min_height) < ratio) {
          view_width  = min_height * ratio;
@@ -508,11 +505,26 @@ function Camera(canvas_framebuf, min_width, min_height) {
          view_width  = min_width;
          view_height = min_width / ratio;
       }
-      matrix = Matrix3.multiply(
+      return Matrix3.multiply(
          Matrix3.scale(2.0 / view_width, 2.0 / view_height),
-         Matrix3.translation(-pos[0], -pos[1])
+         Matrix3.multiply(
+            Matrix3.rotation(-camera_angle),
+            Matrix3.translation(-camera_pos[0], -camera_pos[1])
+         )
       );
-      position = pos;
+   };
+   this.getBoundingBox = function () {
+      let mat = Matrix3.inverse(this.getMatrix());
+      let pt1 = Vector2.transform(mat, [-1, +1]);
+      let pt2 = Vector2.transform(mat, [-1, -1]);
+      let pt3 = Vector2.transform(mat, [+1, -1]);
+      let pt4 = Vector2.transform(mat, [+1, +1]);
+      return {
+         left:   Math.min(pt1[0], pt2[0], pt3[0], pt4[0]),
+         right:  Math.max(pt1[0], pt2[0], pt3[0], pt4[0]),
+         bottom: Math.min(pt1[1], pt2[1], pt3[1], pt4[1]),
+         top:    Math.max(pt1[1], pt2[1], pt3[1], pt4[1])
+      };
    };
 }
 
@@ -607,10 +619,10 @@ function Model(gl, json) {
    this.tangent_buffers = {};
    this.vertex_buffers = {};
    for (let anim_name in vertices) {
-      tangent_bufs[anim_name] = vertices[anim_name].map(function (frame) {
+      this.tangent_buffers[anim_name] = vertices[anim_name].map(function (frame) {
          return new ArrayBuffer(gl, calculateTangents(polygons, texcoords, frame));
       });
-      vertex_bufs[anim_name] = vertices[anim_name].map(function (frame) {
+      this.vertex_buffers[anim_name] = vertices[anim_name].map(function (frame) {
          return new ArrayBuffer(gl, frame);
       });
    }
