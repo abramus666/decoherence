@@ -1,3 +1,14 @@
+'use strict'
+
+function Model(gl, json) {
+   this.model_renderer = new ModelRenderer(gl, json);
+}
+
+Model.prototype.draw = function (shader, anim_name, anim_pos) {
+   this.model_renderer.draw(shader, anim_name, anim_pos);
+}
+
+//==============================================================================
 
 function traverseBranch(func, bbox) {
    let sub1 = this.sub1;
@@ -86,14 +97,14 @@ Map.prototype.drawShadowMap = function (shader, camera, light) {
    this.map_renderer.drawShadowMap(shadow_casters, shader, camera, light);
 }
 
-Map.prototype.getPotentialColliders = function (entity, delta_position) {
+Map.prototype.getPotentialColliders = function (start_position, delta_position, radius) {
    let potential_colliders = [];
-   let reach = entity.radius + Vector2.length(delta_position);
+   let reach = radius + Vector2.length(delta_position);
    let bbox = {
-      left:   entity.position[0] - reach,
-      right:  entity.position[0] + reach,
-      bottom: entity.position[1] - reach,
-      top:    entity.position[1] + reach
+      left:   start_position[0] - reach,
+      right:  start_position[0] + reach,
+      bottom: start_position[1] - reach,
+      top:    start_position[1] + reach
    };
    let collect_collider = function (node) {
       if (node.is_collider) {
@@ -170,16 +181,16 @@ function tryResolveCollisionFallback(start_position, delta_position, radius, pot
    return saved_delta;
 }
 
-Map.prototype.resolveCollision = function (entity, delta_position) {
-   let potential_colliders = this.getPotentialColliders(entity, delta_position);
+Map.prototype.resolveCollision = function (start_position, delta_position, radius) {
+   let potential_colliders = this.getPotentialColliders(start_position, delta_position, radius);
    let num_steps = 2;
-   let position = entity.position;
+   let position = start_position;
    let step_delta = Vector2.scale(1.0 / num_steps, delta_position);
    let total_delta = [0,0];
    for (let i = 0; i < num_steps; i++) {
-      let try_delta = tryResolveCollision(position, step_delta, entity.radius, potential_colliders);
+      let try_delta = tryResolveCollision(position, step_delta, radius, potential_colliders);
       if (!try_delta) {
-         try_delta = tryResolveCollisionFallback(position, step_delta, entity.radius, potential_colliders);
+         try_delta = tryResolveCollisionFallback(position, step_delta, radius, potential_colliders);
       }
       if (try_delta) {
          position = Vector2.add(position, try_delta);
@@ -187,4 +198,42 @@ Map.prototype.resolveCollision = function (entity, delta_position) {
       }
    }
    return total_delta;
+}
+
+//==============================================================================
+
+function MovingEntity(properties) {
+   let map = null;
+   let position = null;
+   let velocity = [0,0];
+   let angle = 0;
+
+   this.spawn = function (spawn_map, spawn_position) {
+      map = spawn_map;
+      position = spawn_position;
+   };
+   this.getAngle = function () {
+      return angle;
+   };
+   this.getPosition = function () {
+      return position;
+   };
+   this.lookInDirection = function (direction) {
+      angle = Math.atan2(direction[1], direction[0]);
+   };
+   this.moveInDirection = function (direction, dt) {
+      // Calculate change of the velocity from friction. Friction depends
+      // on the current speed, and is equal to acceleration for max speed.
+      let dv1 = Vector2.scale(-(properties.acceleration / properties.max_speed) * dt, velocity);
+      // Calculate change of the velocity based on the given direction.
+      let dv2 = Vector2.scale(properties.acceleration * dt, Vector2.normalize(direction));
+      // Calculate the resulting velocity.
+      let v = Vector2.add(velocity, Vector2.add(dv1, dv2));
+      // Try to move, see if there are any collisions.
+      let ds1 = Vector2.scale(dt, v);
+      let ds2 = map.resolveCollision(position, ds1, properties.radius);
+      // Calculate the final position and velocity.
+      position = Vector2.add(position, ds2);
+      velocity = Vector2.scale(1.0 / dt, ds2);
+   };
 }

@@ -1,3 +1,4 @@
+'use strict'
 
 let Vector2 = {
    length: function (v) {
@@ -45,6 +46,13 @@ let Vector2 = {
  * is used, therefore rows in the matrices below are actually columns.
  */
 let Matrix3 = {
+   identity: function () {
+      return [
+         1, 0, 0,
+         0, 1, 0,
+         0, 0, 1
+      ];
+   },
    rotation: function (angle) {
       // Counterclockwise rotation.
       let c = Math.cos(angle);
@@ -55,18 +63,18 @@ let Matrix3 = {
          0, 0, 1
       ];
    },
-   scale: function (x, y) {
+   scale: function (v) {
       return [
-         x, 0, 0,
-         0, y, 0,
+         v[0], 0, 0,
+         0, v[1], 0,
          0, 0, 1
       ];
    },
-   translation: function (x, y) {
+   translation: function (v) {
       return [
          1, 0, 0,
          0, 1, 0,
-         x, y, 1
+         v[0], v[1], 1
       ];
    },
    multiply: function (m1, m2) {

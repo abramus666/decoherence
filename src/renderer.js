@@ -1,3 +1,4 @@
+'use strict'
 
 function buildShaderProgram(gl, vs_source, fs_source) {
 
@@ -304,58 +305,6 @@ function ShadowShader(gl) {
 
 //==============================================================================
 
-function ResourceLoader(gl) {
-   let resources = {};
-   let num_pending = 0;
-
-   function loadImage(url, create_func) {
-      if (!(url in resources)) {
-         num_pending += 1;
-         let image = new Image();
-         image.onload = function () {
-            resources[url] = create_func(image);
-            num_pending -= 1;
-         };
-         image.src = url;
-      }
-   }
-
-   function loadJson(url, create_func) {
-      if (!(url in resources)) {
-         num_pending += 1;
-         let request = new XMLHttpRequest();
-         request.onload = function () {
-            resources[url] = create_func(request.response);
-            num_pending -= 1;
-         };
-         request.open('GET', url);
-         request.responseType = 'json';
-         request.send();
-      }
-   }
-
-   this.loadTexture = function (url) {
-      loadImage(url, image => new TextureFromImage(gl, image));
-   };
-   this.loadTexture_sRGB = function (url) {
-      loadImage(url, image => new TextureFromImage_sRGB(gl, image));
-   };
-   this.loadModel = function (url) {
-      loadJson(url, json => new Model(gl, json));
-   };
-   this.loadMap = function (url) {
-      loadJson(url, json => new Map(gl, json));
-   };
-   this.get = function (url) {
-      return resources[url];
-   };
-   this.completed = function () {
-      return (num_pending == 0);
-   };
-}
-
-//==============================================================================
-
 function linearizeImage(image) {
    let canvas = document.createElement('canvas');
    let context = canvas.getContext('2d');
@@ -382,25 +331,30 @@ function linearizeImage(image) {
    return pixels;
 }
 
-function createAndSetupTexture(gl, filter, wrap) {
+function Texture(gl, filter, wrap) {
    let id = gl.createTexture();
    gl.bindTexture(gl.TEXTURE_2D, id);
    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
-   return id;
+
+   this.getId = function () {
+      return id;
+   };
+   this.bindTo = function (index) {
+      gl.activeTexture(gl.TEXTURE0 + index);
+      gl.bindTexture(gl.TEXTURE_2D, id);
+   };
 }
 
 function TextureFromImage(gl, image) {
-   this.glcontext = gl;
-   this.id = createAndSetupTexture(gl, gl.LINEAR, gl.CLAMP_TO_EDGE);
+   Texture.call(this, gl, gl.LINEAR, gl.CLAMP_TO_EDGE);
    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
 }
 
 function TextureFromImage_sRGB(gl, image) {
-   this.glcontext = gl;
-   this.id = createAndSetupTexture(gl, gl.LINEAR, gl.CLAMP_TO_EDGE);
+   Texture.call(this, gl, gl.LINEAR, gl.CLAMP_TO_EDGE);
    // Using extension is preferable because storing linearized
    // colors with 8-bit resolution will cause loss of information.
    let ext = gl.getExtension('EXT_sRGB');
@@ -412,29 +366,17 @@ function TextureFromImage_sRGB(gl, image) {
 }
 
 function TextureFromPixels(gl, width, height, pixels) {
-   this.glcontext = gl;
-   this.id = createAndSetupTexture(gl, gl.LINEAR, gl.CLAMP_TO_EDGE);
+   Texture.call(this, gl, gl.LINEAR, gl.CLAMP_TO_EDGE);
    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
 }
 
 function TextureFromRandomBytes(gl, width, height) {
-   this.glcontext = gl;
-   this.id = createAndSetupTexture(gl, gl.LINEAR, gl.REPEAT);
    let nbytes = width * height * 4;
    let pixels = new Uint8Array(nbytes);
    for (let i = 0; i < nbytes; i++) {
       pixels[i] = Math.round(Math.random() * 255.0);
    }
-   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-}
-
-TextureFromImage.prototype.bindTo =
-TextureFromImage_sRGB.prototype.bindTo =
-TextureFromPixels.prototype.bindTo =
-TextureFromRandomBytes.prototype.bindTo = function (index) {
-   let gl = this.glcontext;
-   gl.activeTexture(gl.TEXTURE0 + index);
-   gl.bindTexture(gl.TEXTURE_2D, this.id);
+   TextureFromPixels.call(this, gl, width, height, pixels);
 }
 
 //==============================================================================
@@ -448,7 +390,7 @@ function TextureFramebuffer(gl, width, height) {
 
    let framebuf_id = gl.createFramebuffer();
    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuf_id);
-   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture.id, 0);
+   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture.getId(), 0);
    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthbuf_id);
 
    this.bind = function () {
@@ -493,6 +435,9 @@ function Camera(canvas_framebuf, min_width, min_height) {
    this.setPosition = function (position) {
       camera_pos = position;
    };
+   this.getAngle = function () {
+      return camera_angle;
+   };
    this.getPosition = function () {
       return camera_pos;
    };
@@ -506,10 +451,10 @@ function Camera(canvas_framebuf, min_width, min_height) {
          view_height = min_width / ratio;
       }
       return Matrix3.multiply(
-         Matrix3.scale(2.0 / view_width, 2.0 / view_height),
+         Matrix3.scale([2.0 / view_width, 2.0 / view_height]),
          Matrix3.multiply(
             Matrix3.rotation(-camera_angle),
-            Matrix3.translation(-camera_pos[0], -camera_pos[1])
+            Matrix3.translation(Vector2.scale(-1.0, camera_pos))
          )
       );
    };
@@ -609,7 +554,7 @@ function DynamicElementArrayBuffer(gl, maxsize) {
 
 //==============================================================================
 
-function Model(gl, json) {
+function ModelRenderer(gl, json) {
    let polygons  = json['polygons'];
    let texcoords = json['texcoords'];
    let vertices  = json['vertices'];
@@ -628,7 +573,7 @@ function Model(gl, json) {
    }
 }
 
-Model.prototype.draw = function (shader, anim_name, anim_pos) {
+ModelRenderer.prototype.draw = function (shader, anim_name, anim_pos) {
    if (anim_pos < 0.0) anim_pos = 0.0;
    if (anim_pos > 1.0) anim_pos = 1.0;
    let gl = this.glcontext;
@@ -685,18 +630,10 @@ MapRenderer.prototype.draw = function (polygons, shader, camera) {
    };
    shader.setupGeometry(this.texcoord_buffer.id, this.tangent_buffer.id, this.tangent_buffer.id, this.vertex_buffer.id, this.vertex_buffer.id, 0);
    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.id);
-   // WebGL setup.
-   gl.enable(gl.DEPTH_TEST);
-   gl.depthFunc(gl.LESS);
-   gl.clearColor(0.0, 0.0, 0.0, 1.0);
-   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-   // Draw.
    for (let node of polygons) {
       add_geometry(node.index_array);
    }
    flush_buffer();
-   // WebGL cleanup.
-   gl.disable(gl.DEPTH_TEST);
 }
 
 MapRenderer.prototype.drawShadowMap = function (shadow_casters, shader, camera, light) {
@@ -716,10 +653,6 @@ MapRenderer.prototype.drawShadowMap = function (shadow_casters, shader, camera, 
    shader.setupGeometry(buf.id);
    // WebGL setup.
    gl.enable(gl.BLEND);
-   gl.enable(gl.DEPTH_TEST);
-   gl.depthFunc(gl.LESS);
-   gl.clearColor(0.0, 0.0, 0.0, 0.0);
-   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
    // Draw alpha component only (not RGB).
    gl.blendFuncSeparate(gl.ZERO, gl.ONE, gl.ONE, gl.ZERO);
    for (let node of shadow_casters) {
@@ -735,7 +668,6 @@ MapRenderer.prototype.drawShadowMap = function (shadow_casters, shader, camera, 
    }
    flush_buffer();
    // WebGL cleanup.
-   gl.disable(gl.DEPTH_TEST);
    gl.disable(gl.BLEND);
 }
 
