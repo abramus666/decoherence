@@ -1,11 +1,87 @@
 'use strict'
 
+function interpolateBetweenPoints(frame1, frame2, delta) {
+   return [
+      frame1[0] + (frame2[0] - frame1[0]) * delta,
+      frame1[1] + (frame2[1] - frame1[1]) * delta
+   ];
+}
+function interpolateBetweenCircles(frame1, frame2, delta) {
+   return {
+      radius: frame1.radius + (frame2.radius - frame1.radius) * delta,
+      center: interpolateBetweenPoints(frame1.center, frame2.center, delta)
+   };
+}
+function interpolateBetweenEdges(frame1, frame2, delta) {
+   return {
+      pt1: interpolateBetweenPoints(frame1.pt1, frame2.pt1, delta),
+      pt2: interpolateBetweenPoints(frame1.pt2, frame2.pt2, delta)
+   };
+}
+
+function getModelEntities(json) {
+   let vertices = json['vertices'];
+   let entities = {};
+   for (let entity of json['entities']) {
+      let name = entity['name'];
+      let val = entity['value'];
+      // Save the appropriate interpolation function for the given entity type.
+      // Determine entity coordinates for all animation frames.
+      if (entity['kind'] == 'point') {
+         entities[name] = {interpolate_func: interpolateBetweenPoints};
+         for (let anim_name in vertices) {
+            entities[name][anim_name] = vertices[anim_name].map(function (frame) {
+               return frame[val];
+            });
+         }
+      } else if (entity['kind'] == 'circle') {
+         entities[name] = {interpolate_func: interpolateBetweenCircles};
+         for (let anim_name in vertices) {
+            entities[name][anim_name] = vertices[anim_name].map(function (frame) {
+               return {
+                  radius: distanceBetweenTwoPoints(frame[val[0]], frame[val[1]]),
+                  center: frame[val[0]]
+               };
+            });
+         }
+      } else if (entity['kind'] == 'edge') {
+         entities[name] = {interpolate_func: interpolateBetweenEdges};
+         for (let anim_name in vertices) {
+            entities[name][anim_name] = vertices[anim_name].map(function (frame) {
+               return {
+                  pt1: frame[val[0]],
+                  pt2: frame[val[1]]
+               };
+            });
+         }
+      }
+   }
+   return entities;
+}
+
 function Model(gl, json) {
+   this.entities = getModelEntities(json);
    this.model_renderer = new ModelRenderer(gl, json);
 }
 
 Model.prototype.draw = function (shader, anim_name, anim_pos) {
    this.model_renderer.draw(shader, anim_name, anim_pos);
+}
+
+Model.prototype.get = function (entity_name, anim_name, anim_pos) {
+   let frames = this.entities[entity_name][anim_name];
+   // Select two frames to interpolate between.
+   let n = Math.min(Math.max(anim_pos, 0.0), 1.0) * (frames.length-1);
+   let i1 = Math.trunc(n);
+   let i2 = (i1 + 1) % frames.length;
+   let delta = n - i1;
+   if (delta == 0) {
+      // Exact match, interpolation not needed.
+      return frames[i1];
+   } else {
+      // Perform linear interpolation based on animation position.
+      return this.entities[entity_name].interpolate_func(frames[i1], frames[i2], delta);
+   }
 }
 
 //==============================================================================
@@ -86,7 +162,7 @@ Map.prototype.draw = function (shader, camera) {
    this.map_renderer.draw(polygons, shader, camera);
 }
 
-Map.prototype.drawShadowMap = function (shader, camera, light) {
+Map.prototype.drawShadowMap = function (shader, camera, light_position) {
    let shadow_casters = [];
    let collect_shadow_caster = function (node) {
       if (node.is_shadow_caster) {
@@ -94,7 +170,7 @@ Map.prototype.drawShadowMap = function (shader, camera, light) {
       }
    };
    this.entities_root.traverse(collect_shadow_caster, camera.getBoundingBox());
-   this.map_renderer.drawShadowMap(shadow_casters, shader, camera, light);
+   this.map_renderer.drawShadowMap(shadow_casters, shader, camera, light_position);
 }
 
 Map.prototype.getPotentialColliders = function (start_position, delta_position, radius) {
@@ -204,29 +280,39 @@ Map.prototype.resolveCollision = function (start_position, delta_position, radiu
 
 function MovingEntity(properties) {
    let map = null;
+   let look_target = null;
    let position = null;
-   let velocity = [0,0];
-   let angle = 0;
+   let velocity = [0,0]; // Based on actual position changes.
+   let move_dir = [0,0]; // Attempted move direction.
 
    this.spawn = function (spawn_map, spawn_position) {
       map = spawn_map;
       position = spawn_position;
    };
-   this.getAngle = function () {
-      return angle;
+   this.getLookAngle = function () {
+      let look_dir = move_dir;
+      if (look_target) {
+         look_dir = Vector2.subtract(look_target, position);
+      }
+      return angleFromVector(look_dir);
+   };
+   this.getLookTarget = function () {
+      return look_target;
    };
    this.getPosition = function () {
       return position;
    };
-   this.lookInDirection = function (direction) {
-      angle = Math.atan2(direction[1], direction[0]);
+   this.lookAt = function (target_position) {
+      look_target = target_position;
    };
-   this.moveInDirection = function (direction, dt) {
+   this.moveInDirection = function (move_direction, dt) {
+      // Save attempted move direction.
+      move_dir = Vector2.normalize(move_direction);
       // Calculate change of the velocity from friction. Friction depends
       // on the current speed, and is equal to acceleration for max speed.
       let dv1 = Vector2.scale(-(properties.acceleration / properties.max_speed) * dt, velocity);
       // Calculate change of the velocity based on the given direction.
-      let dv2 = Vector2.scale(properties.acceleration * dt, Vector2.normalize(direction));
+      let dv2 = Vector2.scale(properties.acceleration * dt, move_dir);
       // Calculate the resulting velocity.
       let v = Vector2.add(velocity, Vector2.add(dv1, dv2));
       // Try to move, see if there are any collisions.

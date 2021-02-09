@@ -574,13 +574,12 @@ function ModelRenderer(gl, json) {
 }
 
 ModelRenderer.prototype.draw = function (shader, anim_name, anim_pos) {
-   if (anim_pos < 0.0) anim_pos = 0.0;
-   if (anim_pos > 1.0) anim_pos = 1.0;
    let gl = this.glcontext;
    let texcoords = this.texcoord_buffer;
    let tangents = this.tangent_buffers[anim_name];
    let vertices = this.vertex_buffers[anim_name];
-   let n = anim_pos * (vertices.length-1);
+   // Select two frames to interpolate between.
+   let n = Math.min(Math.max(anim_pos, 0.0), 1.0) * (vertices.length-1);
    let i1 = Math.trunc(n);
    let i2 = (i1 + 1) % vertices.length;
    let delta = n - i1;
@@ -591,13 +590,13 @@ ModelRenderer.prototype.draw = function (shader, anim_name, anim_pos) {
 
 //==============================================================================
 
-function getPolygons(json_node) {
+function getMapPolygons(json_node) {
    let polygons = [];
    if (json_node['kind'] == 'polygon') {
       polygons.push(json_node['value']);
    } else {
-      polygons = polygons.concat(getPolygons(json_node['sub1']));
-      polygons = polygons.concat(getPolygons(json_node['sub2']));
+      polygons = polygons.concat(getMapPolygons(json_node['sub1']));
+      polygons = polygons.concat(getMapPolygons(json_node['sub2']));
    }
    return polygons;
 }
@@ -608,7 +607,7 @@ function MapRenderer(gl, json) {
    let vertices  = json['vertices'];
    this.glcontext = gl;
    this.texcoord_buffer = new ArrayBuffer(gl, texcoords);
-   this.tangent_buffer = new ArrayBuffer(gl, calculateTangents(getPolygons(polygons), texcoords, vertices));
+   this.tangent_buffer = new ArrayBuffer(gl, calculateTangents(getMapPolygons(polygons), texcoords, vertices));
    this.vertex_buffer = new ArrayBuffer(gl, vertices);
    this.index_buffer = new DynamicElementArrayBuffer(gl, 64*1024);
    this.shadow_buffer = new DynamicArrayBuffer(gl, 256*1024);
@@ -636,7 +635,7 @@ MapRenderer.prototype.draw = function (polygons, shader, camera) {
    flush_buffer();
 }
 
-MapRenderer.prototype.drawShadowMap = function (shadow_casters, shader, camera, light) {
+MapRenderer.prototype.drawShadowMap = function (shadow_casters, shader, camera, light_position) {
    let gl = this.glcontext;
    let buf = this.shadow_buffer;
    let flush_buffer = function () {
@@ -656,7 +655,7 @@ MapRenderer.prototype.drawShadowMap = function (shadow_casters, shader, camera, 
    // Draw alpha component only (not RGB).
    gl.blendFuncSeparate(gl.ZERO, gl.ONE, gl.ONE, gl.ZERO);
    for (let node of shadow_casters) {
-      castShadowAlpha(add_geometry, light.position, node.pt1, node.pt2, camera.getBoundingBox());
+      castShadowAlpha(add_geometry, light_position, node.pt1, node.pt2, camera.getBoundingBox());
    }
    flush_buffer();
    // Clear depth buffer before the next pass.
@@ -664,7 +663,7 @@ MapRenderer.prototype.drawShadowMap = function (shadow_casters, shader, camera, 
    // Draw RGB components only (not alpha).
    gl.blendFuncSeparate(gl.ONE, gl.ZERO, gl.ZERO, gl.ONE);
    for (let node of shadow_casters) {
-      castShadowColor(add_geometry, light.position, node.pt1, node.pt2, camera.getBoundingBox());
+      castShadowColor(add_geometry, light_position, node.pt1, node.pt2, camera.getBoundingBox());
    }
    flush_buffer();
    // WebGL cleanup.
@@ -674,8 +673,8 @@ MapRenderer.prototype.drawShadowMap = function (shadow_casters, shader, camera, 
 //==============================================================================
 
 function castShadowAlpha(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera_bbox) {
-   let angle1 = Math.atan2(edge_pt1[1] - light_pt[1], edge_pt1[0] - light_pt[0]);
-   let angle2 = Math.atan2(edge_pt2[1] - light_pt[1], edge_pt2[0] - light_pt[0]);
+   let angle1 = angleFromVector(Vector2.subtract(edge_pt1, light_pt));
+   let angle2 = angleFromVector(Vector2.subtract(edge_pt2, light_pt));
    let angle = angleAverage(angle1, angle2);
    // If the shadow angles are too wide then divide the edge into two parts and process
    // each part separately. This is to avoid drawing very large triangles.
@@ -718,8 +717,8 @@ function castShadowAlpha(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera
 }
 
 function castShadowColor(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera_bbox) {
-   let angle1 = Math.atan2(edge_pt1[1] - light_pt[1], edge_pt1[0] - light_pt[0]);
-   let angle2 = Math.atan2(edge_pt2[1] - light_pt[1], edge_pt2[0] - light_pt[0]);
+   let angle1 = angleFromVector(Vector2.subtract(edge_pt1, light_pt));
+   let angle2 = angleFromVector(Vector2.subtract(edge_pt2, light_pt));
    let angle = angleAverage(angle1, angle2);
    if (angleDifference(angle1, angle2) > Math.PI/2) {
       let l1 = lineFromTwoPoints(edge_pt1, edge_pt2);

@@ -96,6 +96,13 @@ function ResourceLoader(gl) {
 function gameRender() {
    let gl = globals.glcontext;
 
+   // Determine the light parameters.
+   let light = {
+      position:    globals.player.getPosition().concat(1), // Add "z" vector component.
+      target:      globals.player.getLookTarget().concat(0), // Add "z" vector component.
+      attenuation: [100, 1]
+   };
+
    // Prepare for drawing on the shadowmap framebuffer.
    globals.shadow_framebuf.bind();
    globals.shadow_shader.enable();
@@ -106,7 +113,7 @@ function gameRender() {
    gl.depthFunc(gl.LESS);
    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
    // Draw the shadows.
-   globals.map.drawShadowMap(globals.shadow_shader, globals.camera, globals.light);
+   globals.map.drawShadowMap(globals.shadow_shader, globals.camera, light.position);
    // WebGL cleanup.
    gl.disable(gl.DEPTH_TEST);
 
@@ -114,7 +121,7 @@ function gameRender() {
    globals.canvas_framebuf.bind();
    globals.default_shader.enable();
    globals.default_shader.setupCamera(globals.camera.getMatrix(), globals.camera.getPosition());
-   globals.default_shader.setupLight(globals.light.position, globals.light.target, globals.light.attenuation);
+   globals.default_shader.setupLight(light.position, light.target, light.attenuation);
    globals.default_shader.setupGamma(globals.gamma);
    globals.shadow_framebuf.bindTextureTo(3);
    globals.texture_random.bindTo(4);
@@ -126,7 +133,7 @@ function gameRender() {
    globals.default_shader.setupModel(
       Matrix3.multiply(
          Matrix3.translation(globals.player.getPosition()),
-         Matrix3.rotation(globals.player.getAngle())
+         Matrix3.rotation(globals.player.getLookAngle())
       )
    );
    globals.player.diffuse.bindTo(0);
@@ -179,7 +186,7 @@ function gameUpdate(dt) {
       move_dir[0] += look_dir[1];
       move_dir[1] -= look_dir[0];
    }
-   globals.player.lookInDirection(look_dir);
+   globals.player.lookAt(target_pos);
    globals.player.moveInDirection(move_dir, dt);
 
    // Update the camera position.
@@ -187,13 +194,6 @@ function gameUpdate(dt) {
    let camera_dir = Vector2.transform(Matrix3.rotation(camera_angle), [0,1]);
    let camera_pos = Vector2.add(Vector2.scale(GAME_PROPERTIES.min_display_size/2-1, camera_dir), player_pos);
    globals.camera.setPosition(camera_pos.concat(0)); // Add "z" vector component.
-
-   // Update the light parameters.
-   globals.light = {
-      position:    player_pos.concat(1), // Add "z" vector component.
-      target:      target_pos.concat(0), // Add "z" vector component.
-      attenuation: [100, 1]
-   };
 }
 
 function gameInitialize() {

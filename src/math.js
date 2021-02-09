@@ -116,6 +116,10 @@ let Matrix3 = {
  *  -3PI/4  -PI/2  -PI/4
  */
 
+function angleFromVector(vec) {
+   return Math.atan2(vec[1], vec[0]);
+}
+
 function angleDifference(angle1, angle2) {
    let angle = Math.abs(angle1 - angle2);
    if (angle > Math.PI) {
