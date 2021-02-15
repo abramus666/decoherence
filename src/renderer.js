@@ -441,6 +441,12 @@ function Camera(canvas_framebuf, min_width, min_height) {
    this.getPosition = function () {
       return camera_pos;
    };
+   this.getViewWidth = function () {
+      return view_width;
+   };
+   this.getViewHeight = function () {
+      return view_height;
+   };
    this.getMatrix = function () {
       let ratio = canvas_framebuf.getAspectRatio();
       if ((min_width / min_height) < ratio) {
@@ -678,7 +684,7 @@ function castShadowAlpha(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera
    let angle = angleAverage(angle1, angle2);
    // If the shadow angles are too wide then divide the edge into two parts and process
    // each part separately. This is to avoid drawing very large triangles.
-   if (angleDifference(angle1, angle2) > Math.PI/2) {
+   if (Math.abs(angleDifference(angle1, angle2)) > Math.PI/2) {
       let l1 = lineFromTwoPoints(edge_pt1, edge_pt2);
       let l2 = lineFromPointAndAngle(light_pt, angle);
       let pt = lineIntersection(l1, l2);
@@ -720,7 +726,7 @@ function castShadowColor(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera
    let angle1 = angleFromVector(Vector2.subtract(edge_pt1, light_pt));
    let angle2 = angleFromVector(Vector2.subtract(edge_pt2, light_pt));
    let angle = angleAverage(angle1, angle2);
-   if (angleDifference(angle1, angle2) > Math.PI/2) {
+   if (Math.abs(angleDifference(angle1, angle2)) > Math.PI/2) {
       let l1 = lineFromTwoPoints(edge_pt1, edge_pt2);
       let l2 = lineFromPointAndAngle(light_pt, angle);
       let pt = lineIntersection(l1, l2);

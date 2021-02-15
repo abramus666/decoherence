@@ -121,10 +121,9 @@ function angleFromVector(vec) {
 }
 
 function angleDifference(angle1, angle2) {
-   let angle = Math.abs(angle1 - angle2);
-   if (angle > Math.PI) {
-      angle = 2*Math.PI - angle;
-   }
+   let angle = angle1 - angle2;
+   if (angle <= -Math.PI) angle += 2*Math.PI;
+   if (angle >   Math.PI) angle -= 2*Math.PI;
    return angle;
 }
 

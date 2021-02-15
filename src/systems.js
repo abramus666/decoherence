@@ -1,5 +1,57 @@
 'use strict'
 
+function ResourceLoader(gl) {
+   let resources = {};
+   let num_pending = 0;
+
+   function loadImage(url, create_func) {
+      if (!(url in resources)) {
+         num_pending += 1;
+         let image = new Image();
+         image.onload = function () {
+            resources[url] = create_func(image);
+            num_pending -= 1;
+         };
+         image.src = url;
+      }
+   }
+
+   function loadJson(url, create_func) {
+      if (!(url in resources)) {
+         num_pending += 1;
+         let request = new XMLHttpRequest();
+         request.onload = function () {
+            resources[url] = create_func(request.response);
+            num_pending -= 1;
+         };
+         request.open('GET', url);
+         request.responseType = 'json';
+         request.send();
+      }
+   }
+
+   this.loadTexture = function (url) {
+      loadImage(url, image => new TextureFromImage(gl, image));
+   };
+   this.loadTexture_sRGB = function (url) {
+      loadImage(url, image => new TextureFromImage_sRGB(gl, image));
+   };
+   this.loadModel = function (url) {
+      loadJson(url, json => new Model(gl, json));
+   };
+   this.loadMap = function (url) {
+      loadJson(url, json => new Map(gl, json));
+   };
+   this.get = function (url) {
+      return resources[url];
+   };
+   this.completed = function () {
+      return (num_pending == 0);
+   };
+}
+
+//==============================================================================
+
 function interpolateBetweenPoints(frame1, frame2, delta) {
    return [
       frame1[0] + (frame2[0] - frame1[0]) * delta,
@@ -131,6 +183,7 @@ function MapNode(json_node, vertices) {
       this.traverse = traverseLeaf;
       this.is_shadow_caster = false;
       this.is_collider = false;
+      this.is_pathnode = false;
 
       if (json_node['kind'] == 'edge') {
          let indexes = json_node['value'];
@@ -138,6 +191,9 @@ function MapNode(json_node, vertices) {
          this.pt2 = vertices[indexes[1]];
          this.is_shadow_caster = true;
          this.is_collider = true;
+      }
+      if (json_node['kind'] == 'rectangle') {
+         this.is_pathnode = true;
       }
    }
 }
@@ -151,6 +207,7 @@ function Map(gl, json) {
    this.entities_root = new MapNode(entities, vertices);
    this.polygons_root = new MapNode(polygons, vertices);
    this.map_renderer = new MapRenderer(gl, json);
+   this.initializePathNodes();
 }
 
 Map.prototype.draw = function (shader, camera) {
@@ -278,41 +335,190 @@ Map.prototype.resolveCollision = function (start_position, delta_position, radiu
 
 //==============================================================================
 
+Map.prototype.initializePathNodes = function () {
+   let all_nodes = this.getPathNodesInBoundingBox(null);
+   for (let current_node of all_nodes) {
+      current_node.neighbors = [];
+      current_node.overlaps = [];
+      current_node.path_id = 0;
+   }
+   // Connect overlapping path nodes.
+   for (let current_node of all_nodes) {
+      for (let other_node of this.getPathNodesInBoundingBox(current_node)) {
+         // Ensure that the connection is not yet established.
+         if ((current_node !== other_node) && !current_node.neighbors.includes(other_node)) {
+            // Create a common "overlap" object referenced by both nodes.
+            let overlap = {
+               left:   Math.max(current_node.left,   other_node.left),
+               right:  Math.min(current_node.right,  other_node.right),
+               bottom: Math.max(current_node.bottom, other_node.bottom),
+               top:    Math.min(current_node.top,    other_node.top)
+            };
+            overlap.center = [
+               (overlap.left + overlap.right) / 2.0,
+               (overlap.bottom + overlap.top) / 2.0
+            ];
+            current_node.neighbors.push(other_node);
+            current_node.overlaps.push(overlap);
+            other_node.neighbors.push(current_node);
+            other_node.overlaps.push(overlap);
+         }
+      }
+   }
+   // Identifier to distinguish already visited path nodes.
+   this.path_id = 0;
+}
+
+Map.prototype.getPathNodesInBoundingBox = function (bbox) {
+   let pathnodes = [];
+   let collect_pathnodes = function (node) {
+      if (node.is_pathnode) {
+         pathnodes.push(node);
+      }
+   };
+   this.entities_root.traverse(collect_pathnodes, bbox);
+   return pathnodes;
+}
+
+Map.prototype.getPathNodesAtPosition = function (position) {
+   let bbox = {
+      left:   position[0],
+      right:  position[0],
+      bottom: position[1],
+      top:    position[1]
+   };
+   return this.getPathNodesInBoundingBox(bbox);
+}
+
+// TODO: Dijkstra’s algorithm.
+Map.prototype.constructPathEndingAt = function (end_position) {
+   this.path_end = end_position;
+   this.path_id += 1;
+   let frontier = this.getPathNodesAtPosition(end_position);
+   for (let start_node of frontier) {
+      start_node.path_id = this.path_id;
+      start_node.path_overlap = null;
+      start_node.path_length = 0;
+   }
+   while (frontier.length > 0) {
+      let current_node = frontier.shift();
+      for (let i = 0; i < current_node.neighbors.length; i++) {
+         let other_node = current_node.neighbors[i];
+         let overlap = current_node.overlaps[i];
+         if (other_node.path_id != this.path_id) {
+            other_node.path_id = this.path_id;
+            other_node.path_overlap = overlap;
+            other_node.path_length = current_node.path_length;
+
+            if (current_node.path_overlap) {
+               other_node.path_length += distanceBetweenTwoPoints(current_node.path_overlap.center, overlap.center);
+            } else {
+               other_node.path_length += distanceBetweenTwoPoints(end_position, overlap.center);
+            }
+            frontier.push(other_node);
+         }
+      }
+   }
+}
+
+Map.prototype.getMoveTargetFromPath = function (start_position, radius) {
+   let target_pos = null;
+   let start_node = null;
+   for (let node of this.getPathNodesAtPosition(start_position)) {
+      if (node.path_id == this.path_id) {
+         // Select the node with the shortest path length.
+         if (!start_node || (start_node.path_length > node.path_length)) {
+            start_node = node;
+         }
+      }
+   }
+   if (start_node) {
+      let overlap = start_node.path_overlap;
+      if (!overlap) {
+         // No overlap means that the start and end positions are
+         // in the same path node. Move towards the end position.
+         target_pos = this.path_end;
+      } else {
+         // If the overlapping region between the two path nodes is large enough,
+         // then try to move towards the nearer part of this region. Otherwise
+         // move towards the center of the region.
+         let x = overlap.center[0];
+         let y = overlap.center[1];
+         let margin = radius * 2.0;
+         if (overlap.right - overlap.left > margin * 2.0) {
+            x = Math.min(Math.max(start_position[0], overlap.left + margin), overlap.right - margin);
+         }
+         if (overlap.top - overlap.bottom > margin * 2.0) {
+            y = Math.min(Math.max(start_position[1], overlap.bottom + margin), overlap.top - margin);
+         }
+         target_pos = [x, y];
+      }
+   }
+   return target_pos;
+}
+
+//==============================================================================
+
 function MovingEntity(properties) {
    let map = null;
-   let look_target = null;
+   let look_vec = null;
    let position = null;
    let velocity = [0,0]; // Based on actual position changes.
-   let move_dir = [0,0]; // Attempted move direction.
+   let move_vec = [0,0]; // Attempted move direction.
 
    this.spawn = function (spawn_map, spawn_position) {
       map = spawn_map;
       position = spawn_position;
    };
    this.getLookAngle = function () {
-      let look_dir = move_dir;
-      if (look_target) {
-         look_dir = Vector2.subtract(look_target, position);
+      if (look_vec) {
+         return angleFromVector(look_vec);
+      } else {
+         return angleFromVector(move_vec);
       }
-      return angleFromVector(look_dir);
    };
    this.getLookTarget = function () {
-      return look_target;
+      return Vector2.add(position, look_vec);
+   };
+   this.getLookVector = function () {
+      return look_vec;
    };
    this.getPosition = function () {
       return position;
    };
-   this.lookAt = function (target_position) {
-      look_target = target_position;
+   this.instantlyLookAt = function (target_position) {
+      look_vec = Vector2.subtract(target_position, position);
+   };
+   this.turnTowardsTarget = function (target_position, dt) {
+      if (look_vec) {
+         let target_vec = Vector2.subtract(target_position, position);
+         // Calculate the current and requested look angle.
+         let look_angle   = angleFromVector(look_vec);
+         let target_angle = angleFromVector(target_vec);
+         // Check if the difference between angles exceeds the defined angular speed.
+         let delta = angleDifference(target_angle, look_angle);
+         let max_delta = properties.angular_speed * dt;
+         // If so, then rotate the original look vector according to the angular speed.
+         // Otherwise just overwrite the look vector with the new one.
+         if (delta > max_delta) {
+            look_vec = Vector2.transform(Matrix3.rotation(+max_delta), look_vec);
+         } else if (delta < -max_delta) {
+            look_vec = Vector2.transform(Matrix3.rotation(-max_delta), look_vec);
+         } else {
+            look_vec = target_vec;
+         }
+      } else {
+         this.instantlyLookAt(target_position);
+      }
    };
    this.moveInDirection = function (move_direction, dt) {
       // Save attempted move direction.
-      move_dir = Vector2.normalize(move_direction);
+      move_vec = Vector2.normalize(move_direction);
       // Calculate change of the velocity from friction. Friction depends
       // on the current speed, and is equal to acceleration for max speed.
-      let dv1 = Vector2.scale(-(properties.acceleration / properties.max_speed) * dt, velocity);
+      let dv1 = Vector2.scale(-(properties.acceleration / properties.maximum_speed) * dt, velocity);
       // Calculate change of the velocity based on the given direction.
-      let dv2 = Vector2.scale(properties.acceleration * dt, move_dir);
+      let dv2 = Vector2.scale(properties.acceleration * dt, move_vec);
       // Calculate the resulting velocity.
       let v = Vector2.add(velocity, Vector2.add(dv1, dv2));
       // Try to move, see if there are any collisions.

@@ -18,18 +18,31 @@ const MAP01_PROPERTIES = {
 };
 
 const PLAYER_PROPERTIES = {
-   acceleration: 25.0,
-   max_speed:    5.0,
-   radius:       0.5,
-   diffuse_url:  'model/test.diff.png',
-   specular_url: 'model/test.spec.png',
-   normal_url:   'model/test.norm.png',
-   model_url:    'model/test.json'
+   acceleration:  25.0,
+   maximum_speed: 5.0,
+   angular_speed: 2.0*Math.PI,
+   radius:        0.5,
+   diffuse_url:   'model/test.diff.png',
+   specular_url:  'model/test.spec.png',
+   normal_url:    'model/test.norm.png',
+   model_url:     'model/test.json'
+};
+
+const ENEMY_PROPERTIES = {
+   acceleration:  25.0,
+   maximum_speed: 2.0,
+   angular_speed: 2.0*Math.PI,
+   radius:        0.5,
+   diffuse_url:   'model/test.diff.png',
+   specular_url:  'model/test.spec.png',
+   normal_url:    'model/test.norm.png',
+   model_url:     'model/test.json'
 };
 
 const RESOURCES = [
    MAP01_PROPERTIES,
-   PLAYER_PROPERTIES
+   PLAYER_PROPERTIES,
+   ENEMY_PROPERTIES
 ];
 
 const KEY_A = 65;
@@ -41,59 +54,7 @@ let globals = {};
 
 //==============================================================================
 
-function ResourceLoader(gl) {
-   let resources = {};
-   let num_pending = 0;
-
-   function loadImage(url, create_func) {
-      if (!(url in resources)) {
-         num_pending += 1;
-         let image = new Image();
-         image.onload = function () {
-            resources[url] = create_func(image);
-            num_pending -= 1;
-         };
-         image.src = url;
-      }
-   }
-
-   function loadJson(url, create_func) {
-      if (!(url in resources)) {
-         num_pending += 1;
-         let request = new XMLHttpRequest();
-         request.onload = function () {
-            resources[url] = create_func(request.response);
-            num_pending -= 1;
-         };
-         request.open('GET', url);
-         request.responseType = 'json';
-         request.send();
-      }
-   }
-
-   this.loadTexture = function (url) {
-      loadImage(url, image => new TextureFromImage(gl, image));
-   };
-   this.loadTexture_sRGB = function (url) {
-      loadImage(url, image => new TextureFromImage_sRGB(gl, image));
-   };
-   this.loadModel = function (url) {
-      loadJson(url, json => new Model(gl, json));
-   };
-   this.loadMap = function (url) {
-      loadJson(url, json => new Map(gl, json));
-   };
-   this.get = function (url) {
-      return resources[url];
-   };
-   this.completed = function () {
-      return (num_pending == 0);
-   };
-}
-
-//==============================================================================
-
-function gameRender() {
+function renderAll() {
    let gl = globals.glcontext;
 
    // Determine the light parameters.
@@ -140,6 +101,17 @@ function gameRender() {
    globals.player.specular.bindTo(1);
    globals.player.normal.bindTo(2);
    globals.player.model.draw(globals.default_shader, '', 0);
+   // Draw the enemy.
+   globals.default_shader.setupModel(
+      Matrix3.multiply(
+         Matrix3.translation(globals.enemy.getPosition()),
+         Matrix3.rotation(globals.enemy.getLookAngle())
+      )
+   );
+   globals.enemy.diffuse.bindTo(0);
+   globals.enemy.specular.bindTo(1);
+   globals.enemy.normal.bindTo(2);
+   globals.enemy.model.draw(globals.default_shader, '', 0);
    // Draw the map.
    globals.default_shader.setupModel(Matrix3.identity());
    globals.map.diffuse.bindTo(0);
@@ -150,21 +122,28 @@ function gameRender() {
    gl.disable(gl.DEPTH_TEST);
 }
 
-function gameUpdate(dt) {
+function updateCamera(dt) {
+   // Update the camera angle by the amount based on the mouse coordinates.
+   // Nonlinear rotation, fastest when the mouse cursor is at the edge of the screen
+   // (maximum angular speed is defined in the player properties).
+   let camera_angle = globals.camera.getAngle();
+   camera_angle -= globals.mousepos[0] * Math.abs(globals.mousepos[0]) * PLAYER_PROPERTIES.angular_speed * dt;
+   // Make sure that the updated angle is in the correct range.
+   if (camera_angle <= -Math.PI) camera_angle += 2*Math.PI;
+   if (camera_angle >   Math.PI) camera_angle -= 2*Math.PI;
+   // Update the camera position.
+   let camera_dir = Vector2.transform(Matrix3.rotation(camera_angle), [0,1]);
+   let delta_pos  = Vector2.scale(globals.camera.getViewHeight()/2-1, camera_dir);
+   let camera_pos = Vector2.add(globals.player.getPosition(), delta_pos);
+   globals.camera.setAngle(camera_angle);
+   globals.camera.setPosition(camera_pos.concat(0)); // Add "z" vector component.
+}
+
+function updatePlayer(dt) {
    let key_forward = (KEY_W in globals.keyboard && globals.keyboard[KEY_W]);
    let key_back    = (KEY_S in globals.keyboard && globals.keyboard[KEY_S]);
    let key_left    = (KEY_A in globals.keyboard && globals.keyboard[KEY_A]);
    let key_right   = (KEY_D in globals.keyboard && globals.keyboard[KEY_D]);
-
-   // Update the camera angle by the amount based on the mouse coordinates.
-   // Nonlinear rotation, at most 360 degrees per second
-   // (when the mouse cursor is at the edge of the screen).
-   let camera_angle = globals.camera.getAngle();
-   camera_angle -= globals.mousepos[0] * Math.abs(globals.mousepos[0]) * Math.PI * 2.0 / 60.0;
-   if (camera_angle <= -Math.PI) camera_angle += 2*Math.PI;
-   if (camera_angle >   Math.PI) camera_angle -= 2*Math.PI;
-   globals.camera.setAngle(camera_angle);
-
    // Update the player position and angle using direction based on the mouse coordinates.
    let inv_camera = Matrix3.inverse(globals.camera.getMatrix());
    let target_pos = Vector2.transform(inv_camera, globals.mousepos);
@@ -186,17 +165,29 @@ function gameUpdate(dt) {
       move_dir[0] += look_dir[1];
       move_dir[1] -= look_dir[0];
    }
-   globals.player.lookAt(target_pos);
+   globals.player.instantlyLookAt(target_pos);
    globals.player.moveInDirection(move_dir, dt);
-
-   // Update the camera position.
-   let player_pos = globals.player.getPosition();
-   let camera_dir = Vector2.transform(Matrix3.rotation(camera_angle), [0,1]);
-   let camera_pos = Vector2.add(Vector2.scale(GAME_PROPERTIES.min_display_size/2-1, camera_dir), player_pos);
-   globals.camera.setPosition(camera_pos.concat(0)); // Add "z" vector component.
+   // Construct a path for traversal towards the player.
+   globals.map.constructPathEndingAt(globals.player.getPosition());
 }
 
-function gameInitialize() {
+function updateEnemy(dt) {
+   let target_pos = globals.map.getMoveTargetFromPath(globals.enemy.getPosition(), ENEMY_PROPERTIES.radius);
+   if (target_pos) {
+      globals.enemy.turnTowardsTarget(target_pos, dt);
+      if (distanceBetweenTwoPoints(globals.player.getPosition(), globals.enemy.getPosition()) > 1) {
+         globals.enemy.moveInDirection(globals.enemy.getLookVector(), dt);
+      }
+   }
+}
+
+function updateAll(dt) {
+   updateCamera(dt);
+   updatePlayer(dt);
+   updateEnemy(dt);
+}
+
+function initializeAll() {
    globals.map          = globals.resource_loader.get(MAP01_PROPERTIES.map_url);
    globals.map.diffuse  = globals.resource_loader.get(MAP01_PROPERTIES.diffuse_url);
    globals.map.specular = globals.resource_loader.get(MAP01_PROPERTIES.specular_url);
@@ -208,6 +199,13 @@ function gameInitialize() {
    globals.player.specular = globals.resource_loader.get(PLAYER_PROPERTIES.specular_url);
    globals.player.normal   = globals.resource_loader.get(PLAYER_PROPERTIES.normal_url);
    globals.player.spawn(globals.map, [0,0]);
+
+   globals.enemy          = new MovingEntity(ENEMY_PROPERTIES);
+   globals.enemy.model    = globals.resource_loader.get(ENEMY_PROPERTIES.model_url);
+   globals.enemy.diffuse  = globals.resource_loader.get(ENEMY_PROPERTIES.diffuse_url);
+   globals.enemy.specular = globals.resource_loader.get(ENEMY_PROPERTIES.specular_url);
+   globals.enemy.normal   = globals.resource_loader.get(ENEMY_PROPERTIES.normal_url);
+   globals.enemy.spawn(globals.map, [7,1]);
 }
 
 //==============================================================================
@@ -218,10 +216,10 @@ function tick(timestamp) {
    const dt = GAME_PROPERTIES.step_time;
    while (globals.updated_time + dt <= t) {
       globals.updated_time += dt;
-      gameUpdate(dt);
+      updateAll(dt);
    }
    if (globals.updated_time > t_prev) {
-      gameRender();
+      renderAll();
    }
    window.requestAnimationFrame(tick);
 }
@@ -229,7 +227,7 @@ function tick(timestamp) {
 function tickWait(timestamp) {
    globals.updated_time = timestamp / 1000.0;
    if (globals.resource_loader.completed()) {
-      gameInitialize();
+      initializeAll();
       tick(timestamp);
    } else {
       window.requestAnimationFrame(tickWait);
