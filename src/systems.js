@@ -131,35 +131,32 @@ function PermanentPriorityQueue() {
 
 //==============================================================================
 
-function interpolateBetweenPoints(frame1, frame2, delta) {
-   let point = this.reusable_point;
-   point[0] = linearInterpolation(frame1[0], frame2[0], delta);
-   point[1] = linearInterpolation(frame1[1], frame2[1], delta);
-   return point;
-}
 function interpolateBetweenCircles(frame1, frame2, delta) {
-   let circle = this.reusable_circle;
-   circle.center[0] = linearInterpolation(frame1.center[0], frame2.center[0], delta);
-   circle.center[1] = linearInterpolation(frame1.center[1], frame2.center[1], delta);
-   circle.radius    = linearInterpolation(frame1.radius,    frame2.radius,    delta);
+   let circle = Circle.pool.get();
+   circle.center_x = linearInterpolation(frame1.center_x, frame2.center_x, delta);
+   circle.center_y = linearInterpolation(frame1.center_y, frame2.center_y, delta);
+   circle.radius   = linearInterpolation(frame1.radius,   frame2.radius,   delta);
    return circle;
 }
 function interpolateBetweenEdges(frame1, frame2, delta) {
-   let edge = this.reusable_edge;
-   edge.pt1[0] = linearInterpolation(frame1.pt1[0], frame2.pt1[0], delta);
-   edge.pt1[1] = linearInterpolation(frame1.pt1[1], frame2.pt1[1], delta);
-   edge.pt2[0] = linearInterpolation(frame1.pt2[0], frame2.pt2[0], delta);
-   edge.pt2[1] = linearInterpolation(frame1.pt2[1], frame2.pt2[1], delta);
+   let edge = Vector4.pool.get();
+   edge[0] = linearInterpolation(frame1[0], frame2[0], delta);
+   edge[1] = linearInterpolation(frame1[1], frame2[1], delta);
+   edge[2] = linearInterpolation(frame1[2], frame2[2], delta);
+   edge[3] = linearInterpolation(frame1[3], frame2[3], delta);
    return edge;
+}
+function interpolateBetweenPoints(frame1, frame2, delta) {
+   let point = Vector2.pool.get();
+   point[0] = linearInterpolation(frame1[0], frame2[0], delta);
+   point[1] = linearInterpolation(frame1[1], frame2[1], delta);
+   return point;
 }
 
 function Model(gl, json) {
    let entities = json['entities'];
    let vertices = json['vertices'];
    this.model_renderer = new ModelRenderer(gl, json);
-   this.reusable_point = [0,0];
-   this.reusable_circle = {center: [0,0], radius: 0};
-   this.reusable_edge = {pt1: [0,0], pt2: [0,0]};
    this.entity_interpolate_func = {};
    this.entities = {};
    // Save the appropriate interpolation function for the given entity type.
@@ -168,23 +165,15 @@ function Model(gl, json) {
       let name = entity['name'];
       let kind = entity['kind'];
       let val = entity['value'];
-      if (kind == 'point') {
-         this.entity_interpolate_func[name] = interpolateBetweenPoints;
-         this.entities[name] = {};
-         for (let anim_name in vertices) {
-            this.entities[name][anim_name] = vertices[anim_name].map(function (frame) {
-               return frame[val];
-            });
-         }
-      }
       if (kind == 'circle') {
          this.entity_interpolate_func[name] = interpolateBetweenCircles;
          this.entities[name] = {};
           for (let anim_name in vertices) {
             this.entities[name][anim_name] = vertices[anim_name].map(function (frame) {
                return {
-                  radius: distanceBetweenTwoPoints(frame[val[0]], frame[val[1]]),
-                  center: frame[val[0]]
+                  center_x: frame[val[0]][0],
+                  center_y: frame[val[0]][1],
+                  radius: distanceBetweenTwoPoints(frame[val[0]], frame[val[1]])
                };
             });
          }
@@ -194,10 +183,24 @@ function Model(gl, json) {
          this.entities[name] = {};
          for (let anim_name in vertices) {
             this.entities[name][anim_name] = vertices[anim_name].map(function (frame) {
-               return {
-                  pt1: frame[val[0]],
-                  pt2: frame[val[1]]
-               };
+               return [
+                  frame[val[0]][0],
+                  frame[val[0]][1],
+                  frame[val[1]][0],
+                  frame[val[1]][1]
+               ];
+            });
+         }
+      }
+      if (kind == 'point') {
+         this.entity_interpolate_func[name] = interpolateBetweenPoints;
+         this.entities[name] = {};
+         for (let anim_name in vertices) {
+            this.entities[name][anim_name] = vertices[anim_name].map(function (frame) {
+               return [
+                  frame[val][0],
+                  frame[val][1]
+               ];
             });
          }
       }
@@ -333,11 +336,7 @@ Map.prototype.drawShadowMap = function (shader, camera, light_position) {
 Map.prototype.getPotentialColliders = function (start_position, delta_position, radius) {
    let potential_colliders = this.array_pool.get();
    let reach = radius + Vector2.length(delta_position);
-   let bbox = BoundingBox.pool.get();
-   bbox.left   = start_position[0] - reach;
-   bbox.right  = start_position[0] + reach;
-   bbox.bottom = start_position[1] - reach;
-   bbox.top    = start_position[1] + reach;
+   let bbox = BoundingBox.fromPointAndDistance(start_position, reach);
    this.entities_root.forEach(bbox, 'collectCollider', potential_colliders);
    return potential_colliders;
 }
@@ -475,7 +474,7 @@ Map.prototype.constructPathEndingAt = function (end_position) {
    this.path_id += 1;
    Vector2.copy(this.path_end, end_position);
    // Start from the path nodes at the end position.
-   let start_bbox = BoundingBox.bboxFromPoint(end_position);
+   let start_bbox = BoundingBox.fromPointAndDistance(end_position, 0);
    let start_nodes = this.reusable_array;
    this.entities_root.forEach(start_bbox, 'collectPathNode', start_nodes);
    // Reset starting path nodes and put them to the frontier queue.
@@ -517,7 +516,7 @@ Map.prototype.constructPathEndingAt = function (end_position) {
 Map.prototype.getMoveTargetFromPath = function (start_position, radius) {
    let target_pos = null;
    let start_node = null;
-   let start_bbox = BoundingBox.bboxFromPoint(start_position);
+   let start_bbox = BoundingBox.fromPointAndDistance(start_position, 0);
    let start_nodes = this.reusable_array;
    this.entities_root.forEach(start_bbox, 'collectPathNode', start_nodes);
    while (start_nodes.count > 0) {

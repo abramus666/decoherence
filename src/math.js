@@ -52,14 +52,27 @@ let BoundingBox = {
       dst.bottom = src.bottom;
       dst.top    = src.top;
    },
-   bboxFromPoint: function (point) {
+   fromPointAndDistance: function (point, distance) {
       let out = BoundingBox.pool.get();
-      out.left   = point[0];
-      out.right  = point[0];
-      out.bottom = point[1];
-      out.top    = point[1];
+      out.left   = point[0] - distance;
+      out.right  = point[0] + distance;
+      out.bottom = point[1] - distance;
+      out.top    = point[1] + distance;
       return out;
    }
+};
+
+let Circle = {
+   pool: new ObjectPool(() => ({
+      center_x: 0,
+      center_y: 0,
+      radius:   0
+   })),
+   copy: function (dst, src) {
+      dst.center_x = src.center_x;
+      dst.center_y = src.center_y;
+      dst.radius   = src.radius;
+   },
 };
 
 /*==============================================================================
