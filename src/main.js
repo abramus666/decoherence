@@ -58,11 +58,8 @@ function renderAll() {
    let gl = globals.glcontext;
 
    // Determine the light parameters.
-   let light = {
-      position:    globals.player.getPosition().concat(1), // Add "z" vector component.
-      target:      globals.player.getLookTarget().concat(0), // Add "z" vector component.
-      attenuation: [100, 1]
-   };
+   Vector2.copy(globals.light.position, globals.player.getPosition());
+   Vector2.copy(globals.light.target,   globals.player.getLookTarget());
 
    // Prepare for drawing on the shadowmap framebuffer.
    globals.shadow_framebuf.bind();
@@ -74,7 +71,7 @@ function renderAll() {
    gl.depthFunc(gl.LESS);
    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
    // Draw the shadows.
-   globals.map.drawShadowMap(globals.shadow_shader, globals.camera, light.position);
+   globals.map.drawShadowMap(globals.shadow_shader, globals.camera, globals.light.position);
    // WebGL cleanup.
    gl.disable(gl.DEPTH_TEST);
 
@@ -82,7 +79,7 @@ function renderAll() {
    globals.canvas_framebuf.bind();
    globals.default_shader.enable();
    globals.default_shader.setupCamera(globals.camera.getMatrix(), globals.camera.getPosition());
-   globals.default_shader.setupLight(light.position, light.target, light.attenuation);
+   globals.default_shader.setupLight(globals.light.position, globals.light.target, globals.light.attenuation);
    globals.default_shader.setupGamma(globals.gamma);
    globals.shadow_framebuf.bindTextureTo(3);
    globals.texture_random.bindTo(4);
@@ -132,11 +129,11 @@ function updateCamera(dt) {
    if (camera_angle <= -Math.PI) camera_angle += 2*Math.PI;
    if (camera_angle >   Math.PI) camera_angle -= 2*Math.PI;
    // Update the camera position.
-   let camera_dir = Vector2.transform(Matrix3.rotation(camera_angle), [0,1]);
+   let camera_dir = Vector2.transform(Matrix3.rotation(camera_angle), Vector2.construct(0,1));
    let delta_pos  = Vector2.scale(globals.camera.getViewHeight()/2-1, camera_dir);
    let camera_pos = Vector2.add(globals.player.getPosition(), delta_pos);
    globals.camera.setAngle(camera_angle);
-   globals.camera.setPosition(camera_pos.concat(0)); // Add "z" vector component.
+   globals.camera.setPosition(camera_pos);
 }
 
 function updatePlayer(dt) {
@@ -148,7 +145,7 @@ function updatePlayer(dt) {
    let inv_camera = Matrix3.inverse(globals.camera.getMatrix());
    let target_pos = Vector2.transform(inv_camera, globals.mousepos);
    let look_dir = Vector2.subtract(target_pos, globals.player.getPosition());
-   let move_dir = [0,0];
+   let move_dir = Vector2.construct(0,0);
    if (key_forward) {
       move_dir[0] += look_dir[0];
       move_dir[1] += look_dir[1];
@@ -206,9 +203,21 @@ function initializeAll() {
    globals.enemy.specular = globals.resource_loader.get(ENEMY_PROPERTIES.specular_url);
    globals.enemy.normal   = globals.resource_loader.get(ENEMY_PROPERTIES.normal_url);
    globals.enemy.spawn(globals.map, [7,1]);
+
+   globals.light             = {};
+   globals.light.position    = [0,0,1];
+   globals.light.target      = [0,0,0];
+   globals.light.attenuation = [100,1];
 }
 
 //==============================================================================
+
+function releasePools() {
+   BoundingBox.pool.releaseAll();
+   Vector2.pool.releaseAll();
+   Vector4.pool.releaseAll();
+   Matrix3.pool.releaseAll();
+}
 
 function tick(timestamp) {
    const t_prev = globals.updated_time;
@@ -217,9 +226,11 @@ function tick(timestamp) {
    while (globals.updated_time + dt <= t) {
       globals.updated_time += dt;
       updateAll(dt);
+      releasePools();
    }
    if (globals.updated_time > t_prev) {
       renderAll();
+      releasePools();
    }
    window.requestAnimationFrame(tick);
 }

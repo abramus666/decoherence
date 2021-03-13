@@ -424,30 +424,16 @@ function CanvasFramebuffer(gl, canvas) {
 }
 
 function Camera(canvas_framebuf, min_width, min_height) {
-   let camera_angle = 0;
-   let camera_pos = [0,0,0];
-   let view_width = null;
-   let view_height = null;
+   let camera_angle  = 0;
+   let camera_pos    = [0,0,0]; // Must be 3-element vector.
+   let camera_matrix = [];
+   let camera_bbox   = {};
+   let recalc_matrix = true;
+   let recalc_bbox   = true;
+   let view_width    = 0;
+   let view_height   = 0;
 
-   this.setAngle = function (angle) {
-      camera_angle = angle;
-   };
-   this.setPosition = function (position) {
-      camera_pos = position;
-   };
-   this.getAngle = function () {
-      return camera_angle;
-   };
-   this.getPosition = function () {
-      return camera_pos;
-   };
-   this.getViewWidth = function () {
-      return view_width;
-   };
-   this.getViewHeight = function () {
-      return view_height;
-   };
-   this.getMatrix = function () {
+   function recalcViewSize() {
       let ratio = canvas_framebuf.getAspectRatio();
       if ((min_width / min_height) < ratio) {
          view_width  = min_height * ratio;
@@ -456,26 +442,61 @@ function Camera(canvas_framebuf, min_width, min_height) {
          view_width  = min_width;
          view_height = min_width / ratio;
       }
-      return Matrix3.multiply(
-         Matrix3.scale([2.0 / view_width, 2.0 / view_height]),
-         Matrix3.multiply(
-            Matrix3.rotation(-camera_angle),
-            Matrix3.translation(Vector2.scale(-1.0, camera_pos))
-         )
-      );
+   }
+
+   this.setAngle = function (angle) {
+      camera_angle  = angle;
+      recalc_matrix = true;
+      recalc_bbox   = true;
+   };
+   this.setPosition = function (position) {
+      Vector2.copy(camera_pos, position);
+      recalc_matrix = true;
+      recalc_bbox   = true;
+   };
+   this.getAngle = function () {
+      return camera_angle;
+   };
+   this.getPosition = function () {
+      return camera_pos;
+   };
+   this.getViewWidth = function () {
+      recalcViewSize();
+      return view_width;
+   };
+   this.getViewHeight = function () {
+      recalcViewSize();
+      return view_height;
+   };
+   this.getMatrix = function () {
+      if (recalc_matrix) {
+         recalc_matrix = false;
+         recalcViewSize();
+         let mat = Matrix3.multiply(
+            Matrix3.scale(Vector2.construct(2.0 / view_width, 2.0 / view_height)),
+            Matrix3.multiply(
+               Matrix3.rotation(-camera_angle),
+               Matrix3.translation(Vector2.scale(-1.0, camera_pos))
+            )
+         );
+         Matrix3.copy(camera_matrix, mat);
+      }
+      return camera_matrix;
    };
    this.getBoundingBox = function () {
-      let mat = Matrix3.inverse(this.getMatrix());
-      let pt1 = Vector2.transform(mat, [-1, +1]);
-      let pt2 = Vector2.transform(mat, [-1, -1]);
-      let pt3 = Vector2.transform(mat, [+1, -1]);
-      let pt4 = Vector2.transform(mat, [+1, +1]);
-      return {
-         left:   Math.min(pt1[0], pt2[0], pt3[0], pt4[0]),
-         right:  Math.max(pt1[0], pt2[0], pt3[0], pt4[0]),
-         bottom: Math.min(pt1[1], pt2[1], pt3[1], pt4[1]),
-         top:    Math.max(pt1[1], pt2[1], pt3[1], pt4[1])
-      };
+      if (recalc_bbox) {
+         recalc_bbox = false;
+         let mat = Matrix3.inverse(this.getMatrix());
+         let pt1 = Vector2.transform(mat, Vector2.construct(-1, +1));
+         let pt2 = Vector2.transform(mat, Vector2.construct(-1, -1));
+         let pt3 = Vector2.transform(mat, Vector2.construct(+1, -1));
+         let pt4 = Vector2.transform(mat, Vector2.construct(+1, +1));
+         camera_bbox.left   = Math.min(pt1[0], pt2[0], pt3[0], pt4[0]);
+         camera_bbox.right  = Math.max(pt1[0], pt2[0], pt3[0], pt4[0]);
+         camera_bbox.bottom = Math.min(pt1[1], pt2[1], pt3[1], pt4[1]);
+         camera_bbox.top    = Math.max(pt1[1], pt2[1], pt3[1], pt4[1]);
+      }
+      return camera_bbox;
    };
 }
 
@@ -542,20 +563,42 @@ function ElementArrayBuffer(gl, array) {
    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(arr), gl.STATIC_DRAW);
 }
 
-function DynamicArrayBuffer(gl, maxsize) {
+function DynamicArrayBuffer(gl, max_count, num_vertex_components) {
    this.id = gl.createBuffer();
    this.count = 0;
-   this.maxsize = maxsize;
    gl.bindBuffer(gl.ARRAY_BUFFER, this.id);
-   gl.bufferData(gl.ARRAY_BUFFER, this.maxsize, gl.DYNAMIC_DRAW);
+   gl.bufferData(gl.ARRAY_BUFFER, max_count * Float32Array.BYTES_PER_ELEMENT, gl.DYNAMIC_DRAW);
+
+   this.flush = function () {
+      gl.drawArrays(gl.TRIANGLES, 0, this.count / num_vertex_components);
+      this.count = 0;
+   };
+   this.addGeometry = function (float32_array) {
+      if ((this.count + float32_array.length) > max_count) {
+         this.flush();
+      }
+      gl.bufferSubData(gl.ARRAY_BUFFER, (this.count * Float32Array.BYTES_PER_ELEMENT), float32_array);
+      this.count += float32_array.length;
+   };
 }
 
-function DynamicElementArrayBuffer(gl, maxsize) {
+function DynamicElementArrayBuffer(gl, max_count) {
    this.id = gl.createBuffer();
    this.count = 0;
-   this.maxsize = maxsize;
    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.id);
-   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, this.maxsize, gl.DYNAMIC_DRAW);
+   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, max_count * Uint16Array.BYTES_PER_ELEMENT, gl.DYNAMIC_DRAW);
+
+   this.flush = function () {
+      gl.drawElements(gl.TRIANGLES, this.count, gl.UNSIGNED_SHORT, 0);
+      this.count = 0;
+   };
+   this.addGeometry = function (uint16_array) {
+      if ((this.count + uint16_array.length) > max_count) {
+         this.flush();
+      }
+      gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, (this.count * Uint16Array.BYTES_PER_ELEMENT), uint16_array);
+      this.count += uint16_array.length;
+   };
 }
 
 //==============================================================================
@@ -616,131 +659,132 @@ function MapRenderer(gl, json) {
    this.tangent_buffer = new ArrayBuffer(gl, calculateTangents(getMapPolygons(polygons), texcoords, vertices));
    this.vertex_buffer = new ArrayBuffer(gl, vertices);
    this.index_buffer = new DynamicElementArrayBuffer(gl, 64*1024);
-   this.shadow_buffer = new DynamicArrayBuffer(gl, 256*1024);
+   this.shadow_buffer = new DynamicArrayBuffer(gl, 64*1024, 4);
+   this.float32_array24 = new Float32Array(24);
 }
 
-MapRenderer.prototype.draw = function (polygons, shader, camera) {
+MapRenderer.prototype.draw = function (polygons, polygon_count, shader) {
    let gl = this.glcontext;
-   let buf = this.index_buffer;
-   let flush_buffer = function () {
-      gl.drawElements(gl.TRIANGLES, buf.count, gl.UNSIGNED_SHORT, 0);
-      buf.count = 0;
-   };
-   let add_geometry = function (index_array) {
-      if ((buf.count + index_array.length) * 2 > buf.maxsize) { // 2 bytes per value (Uint16).
-         flush_buffer();
-      }
-      gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, (buf.count * 2), new Uint16Array(index_array));
-      buf.count += index_array.length;
-   };
    shader.setupGeometry(this.texcoord_buffer.id, this.tangent_buffer.id, this.tangent_buffer.id, this.vertex_buffer.id, this.vertex_buffer.id, 0);
-   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.id);
-   for (let node of polygons) {
-      add_geometry(node.index_array);
+   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.index_buffer.id);
+   for (let i = 0; i < polygon_count; i++) {
+      this.index_buffer.addGeometry(polygons[i].index_array);
    }
-   flush_buffer();
+   this.index_buffer.flush();
 }
 
-MapRenderer.prototype.drawShadowMap = function (shadow_casters, shader, camera, light_position) {
+MapRenderer.prototype.drawShadowMap = function (shadow_casters, shadow_caster_count, shader, camera, light_position) {
    let gl = this.glcontext;
-   let buf = this.shadow_buffer;
-   let flush_buffer = function () {
-      gl.drawArrays(gl.TRIANGLES, 0, buf.count / 4); // Each vertex has 4 components.
-      buf.count = 0;
-   };
-   let add_geometry = function (vertex_array) {
-      if ((buf.count + vertex_array.length) * 4 > buf.maxsize) { // 4 bytes per value (Float32).
-         flush_buffer();
-      }
-      gl.bufferSubData(gl.ARRAY_BUFFER, (buf.count * 4), new Float32Array(vertex_array));
-      buf.count += vertex_array.length;
-   };
-   shader.setupGeometry(buf.id);
+   let bbox = camera.getBoundingBox();
+   shader.setupGeometry(this.shadow_buffer.id);
    // WebGL setup.
    gl.enable(gl.BLEND);
    // Draw alpha component only (not RGB).
    gl.blendFuncSeparate(gl.ZERO, gl.ONE, gl.ONE, gl.ZERO);
-   for (let node of shadow_casters) {
-      castShadowAlpha(add_geometry, light_position, node.pt1, node.pt2, camera.getBoundingBox());
+   for (let i = 0; i < shadow_caster_count; i++) {
+      this.castShadowAlpha(light_position, shadow_casters[i].pt1, shadow_casters[i].pt2, bbox);
    }
-   flush_buffer();
+   this.shadow_buffer.flush();
    // Clear depth buffer before the next pass.
    gl.clear(gl.DEPTH_BUFFER_BIT);
    // Draw RGB components only (not alpha).
    gl.blendFuncSeparate(gl.ONE, gl.ZERO, gl.ZERO, gl.ONE);
-   for (let node of shadow_casters) {
-      castShadowColor(add_geometry, light_position, node.pt1, node.pt2, camera.getBoundingBox());
+   for (let i = 0; i < shadow_caster_count; i++) {
+      this.castShadowColor(light_position, shadow_casters[i].pt1, shadow_casters[i].pt2, bbox);
    }
-   flush_buffer();
+   this.shadow_buffer.flush();
    // WebGL cleanup.
    gl.disable(gl.BLEND);
 }
 
 //==============================================================================
 
-function castShadowAlpha(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera_bbox) {
+MapRenderer.prototype.castShadowAlpha = function (light_pt, edge_pt1, edge_pt2, camera_bbox) {
    let angle1 = angleFromVector(Vector2.subtract(edge_pt1, light_pt));
    let angle2 = angleFromVector(Vector2.subtract(edge_pt2, light_pt));
    let angle = angleAverage(angle1, angle2);
    // If the shadow angles are too wide then divide the edge into two parts and process
    // each part separately. This is to avoid drawing very large triangles.
    if (Math.abs(angleDifference(angle1, angle2)) > Math.PI/2) {
-      let l1 = lineFromTwoPoints(edge_pt1, edge_pt2);
-      let l2 = lineFromPointAndAngle(light_pt, angle);
-      let pt = lineIntersection(l1, l2);
+      let l1 = Vector4.lineFromTwoPoints(edge_pt1, edge_pt2);
+      let l2 = Vector4.lineFromPointAndAngle(light_pt, angle);
+      let pt = Vector2.lineIntersection(l1, l2);
       if (pt) {
-         castShadowAlpha(add_geometry_func, light_pt, edge_pt1, pt, camera_bbox);
-         castShadowAlpha(add_geometry_func, light_pt, edge_pt2, pt, camera_bbox);
+         this.castShadowAlpha(light_pt, edge_pt1, pt, camera_bbox);
+         this.castShadowAlpha(light_pt, edge_pt2, pt, camera_bbox);
       }
    } else {
       // Make sure the bounding box is large enough, but don't modify the original one.
-      let bbox = {
-         left:   Math.min(camera_bbox.left,   edge_pt1[0], edge_pt2[0]),
-         right:  Math.max(camera_bbox.right,  edge_pt1[0], edge_pt2[0]),
-         bottom: Math.min(camera_bbox.bottom, edge_pt1[1], edge_pt2[1]),
-         top:    Math.max(camera_bbox.top,    edge_pt1[1], edge_pt2[1])
-      };
+      let bbox = BoundingBox.pool.get();
+      bbox.left   = Math.min(camera_bbox.left,   edge_pt1[0], edge_pt2[0]);
+      bbox.right  = Math.max(camera_bbox.right,  edge_pt1[0], edge_pt2[0]);
+      bbox.bottom = Math.min(camera_bbox.bottom, edge_pt1[1], edge_pt2[1]);
+      bbox.top    = Math.max(camera_bbox.top,    edge_pt1[1], edge_pt2[1]);
       // Cast the edge points along the shadow angles onto the precalculated line.
       // This line is outside of the bounding box and is perpendicular to the average
       // of the shadow angles. That way we don't need to handle corners of the bounding
       // box when drawing the shadow.
-      let l0 = linePerpendicularToAngleOutsideOfBbox(angle, bbox);
-      let l1 = lineFromPointAndAngle(edge_pt1, angle1);
-      let l2 = lineFromPointAndAngle(edge_pt2, angle2);
-      let pt1 = lineIntersection(l0, l1);
-      let pt2 = lineIntersection(l0, l2);
+      let l0 = Vector4.linePerpendicularToAngleOutsideOfBbox(angle, bbox);
+      let l1 = Vector4.lineFromPointAndAngle(edge_pt1, angle1);
+      let l2 = Vector4.lineFromPointAndAngle(edge_pt2, angle2);
+      let pt1 = Vector2.lineIntersection(l0, l1);
+      let pt2 = Vector2.lineIntersection(l0, l2);
       if (pt1 && pt2) {
-         add_geometry_func([
-            edge_pt1[0], edge_pt1[1], 0.0, 0.0,
-            edge_pt2[0], edge_pt2[1], 0.0, 0.0,
-            pt1[0],      pt1[1],      0.0, 0.0,
-            edge_pt2[0], edge_pt2[1], 0.0, 0.0,
-            pt1[0],      pt1[1],      0.0, 0.0,
-            pt2[0],      pt2[1],      0.0, 0.0
-         ]);
+         let arr = this.float32_array24;
+         // 1st triangle, 1st vertex.
+         arr[0] = edge_pt1[0];
+         arr[1] = edge_pt1[1];
+         arr[2] = 0.0;
+         arr[3] = 0.0;
+         // 1st triangle, 2nd vertex.
+         arr[4] = edge_pt2[0];
+         arr[5] = edge_pt2[1];
+         arr[6] = 0.0;
+         arr[7] = 0.0;
+         // 1st triangle, 3rd vertex.
+         arr[8] = pt1[0];
+         arr[9] = pt1[1];
+         arr[10] = 0.0;
+         arr[11] = 0.0;
+         // 2nd triangle, 1st vertex.
+         arr[12] = edge_pt2[0];
+         arr[13] = edge_pt2[1];
+         arr[14] = 0.0;
+         arr[15] = 0.0;
+         // 2nd triangle, 2nd vertex.
+         arr[16] = pt1[0];
+         arr[17] = pt1[1];
+         arr[18] = 0.0;
+         arr[19] = 0.0;
+         // 2nd triangle, 3rd vertex.
+         arr[20] = pt2[0];
+         arr[21] = pt2[1];
+         arr[22] = 0.0;
+         arr[23] = 0.0;
+         this.shadow_buffer.addGeometry(arr);
       }
    }
 }
 
-function castShadowColor(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera_bbox) {
+MapRenderer.prototype.castShadowColor = function (light_pt, edge_pt1, edge_pt2, camera_bbox) {
    let angle1 = angleFromVector(Vector2.subtract(edge_pt1, light_pt));
    let angle2 = angleFromVector(Vector2.subtract(edge_pt2, light_pt));
    let angle = angleAverage(angle1, angle2);
    if (Math.abs(angleDifference(angle1, angle2)) > Math.PI/2) {
-      let l1 = lineFromTwoPoints(edge_pt1, edge_pt2);
-      let l2 = lineFromPointAndAngle(light_pt, angle);
-      let pt = lineIntersection(l1, l2);
+      let l1 = Vector4.lineFromTwoPoints(edge_pt1, edge_pt2);
+      let l2 = Vector4.lineFromPointAndAngle(light_pt, angle);
+      let pt = Vector2.lineIntersection(l1, l2);
       if (pt) {
-         castShadowColor(add_geometry_func, light_pt, edge_pt1, pt, camera_bbox);
-         castShadowColor(add_geometry_func, light_pt, edge_pt2, pt, camera_bbox);
+         this.castShadowColor(light_pt, edge_pt1, pt, camera_bbox);
+         this.castShadowColor(light_pt, edge_pt2, pt, camera_bbox);
       }
    } else {
-      let bbox = {
-         left:   Math.min(camera_bbox.left,   edge_pt1[0], edge_pt2[0]),
-         right:  Math.max(camera_bbox.right,  edge_pt1[0], edge_pt2[0]),
-         bottom: Math.min(camera_bbox.bottom, edge_pt1[1], edge_pt2[1]),
-         top:    Math.max(camera_bbox.top,    edge_pt1[1], edge_pt2[1])
-      };
+      // Make sure the bounding box is large enough, but don't modify the original one.
+      let bbox = BoundingBox.pool.get();
+      bbox.left   = Math.min(camera_bbox.left,   edge_pt1[0], edge_pt2[0]);
+      bbox.right  = Math.max(camera_bbox.right,  edge_pt1[0], edge_pt2[0]);
+      bbox.bottom = Math.min(camera_bbox.bottom, edge_pt1[1], edge_pt2[1]);
+      bbox.top    = Math.max(camera_bbox.top,    edge_pt1[1], edge_pt2[1]);
       // Make sure that "1" identifies the angle of lesser value.
       if ((angle1 > angle2 && angle1 - angle2 < Math.PI) ||
           (angle2 > angle1 && angle2 - angle1 > Math.PI)) {
@@ -761,11 +805,11 @@ function castShadowColor(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera
       if (angle2 >   Math.PI) angle2 -= 2*Math.PI;
       // Cast the edge points onto the line outside of the
       // bounding box and perpendicular to the average angle.
-      let l0 = linePerpendicularToAngleOutsideOfBbox(angle, bbox);
-      let l1 = lineFromPointAndAngle(edge_pt1, angle1);
-      let l2 = lineFromPointAndAngle(edge_pt2, angle2);
-      let pt1 = lineIntersection(l0, l1);
-      let pt2 = lineIntersection(l0, l2);
+      let l0 = Vector4.linePerpendicularToAngleOutsideOfBbox(angle, bbox);
+      let l1 = Vector4.lineFromPointAndAngle(edge_pt1, angle1);
+      let l2 = Vector4.lineFromPointAndAngle(edge_pt2, angle2);
+      let pt1 = Vector2.lineIntersection(l0, l1);
+      let pt2 = Vector2.lineIntersection(l0, l2);
       if (pt1 && pt2) {
          // Calculate the "spread" of the shadow map sampling which implements soft shadows.
          // This spread will be saved as texture coordinate deltas in the shadow map color components.
@@ -780,14 +824,38 @@ function castShadowColor(add_geometry_func, light_pt, edge_pt1, edge_pt2, camera
          let ds2 = 8.0 * dist2 * delta_tan / cam_width;
          let dt1 = 8.0 * dist1 * delta_tan / cam_height;
          let dt2 = 8.0 * dist2 * delta_tan / cam_height;
-         add_geometry_func([
-            edge_pt1[0], edge_pt1[1], 0.0, 0.0,
-            edge_pt2[0], edge_pt2[1], 0.0, 0.0,
-            pt1[0],      pt1[1],      ds1, dt1,
-            edge_pt2[0], edge_pt2[1], 0.0, 0.0,
-            pt1[0],      pt1[1],      ds1, dt1,
-            pt2[0],      pt2[1],      ds2, dt2
-         ]);
+         let arr = this.float32_array24;
+         // 1st triangle, 1st vertex.
+         arr[0] = edge_pt1[0];
+         arr[1] = edge_pt1[1];
+         arr[2] = 0.0;
+         arr[3] = 0.0;
+         // 1st triangle, 2nd vertex.
+         arr[4] = edge_pt2[0];
+         arr[5] = edge_pt2[1];
+         arr[6] = 0.0;
+         arr[7] = 0.0;
+         // 1st triangle, 3rd vertex.
+         arr[8] = pt1[0];
+         arr[9] = pt1[1];
+         arr[10] = ds1;
+         arr[11] = dt1;
+         // 2nd triangle, 1st vertex.
+         arr[12] = edge_pt2[0];
+         arr[13] = edge_pt2[1];
+         arr[14] = 0.0;
+         arr[15] = 0.0;
+         // 2nd triangle, 2nd vertex.
+         arr[16] = pt1[0];
+         arr[17] = pt1[1];
+         arr[18] = ds1;
+         arr[19] = dt1;
+         // 2nd triangle, 3rd vertex.
+         arr[20] = pt2[0];
+         arr[21] = pt2[1];
+         arr[22] = ds2;
+         arr[23] = dt2;
+         this.shadow_buffer.addGeometry(arr);
       }
    }
 }

@@ -50,56 +50,150 @@ function ResourceLoader(gl) {
    };
 }
 
+/*==============================================================================
+ * Permanent array to be used instead of the standard one.
+ * Capacity is doubled each time there is no room for a new element.
+ * Capacity is never decreased.
+ */
+function PermanentArray() {
+   this.array = new Array(32); // Initial capacity.
+   this.count = 0;
+
+   this.insertAt = function (index, obj) {
+      index = Math.min(Math.max(index, 0), this.count);
+      // Double array capacity when there is no room for the new element.
+      if (this.array.length == this.count) {
+         this.array.length *= 2;
+      }
+      // Shift array elements to make room for the new element.
+      for (let i = this.count; i > index; i--) {
+         this.array[i] = this.array[i-1];
+      }
+      this.array[index] = obj;
+      this.count += 1;
+   };
+   this.removeAt = function (index) {
+      if (index < 0 || index >= this.count) {
+         return undefined;
+      }
+      let obj = this.array[index];
+      // Shift array elements to delete gap after the removed element.
+      for (let i = index; i < this.count-1; i++) {
+         this.array[i] = this.array[i+1];
+      }
+      this.array[this.count-1] = undefined;
+      this.count -= 1;
+      return obj;
+   };
+   this.push = function (obj) {
+      this.insertAt(this.count, obj);
+   };
+   this.pop = function () {
+      return this.removeAt(this.count-1);
+   };
+   this.clear = function () {
+      for (let i = 0; i < this.count; i++) {
+         this.array[i] = undefined;
+      }
+      this.count = 0;
+   };
+}
+
+/*==============================================================================
+ * Priority queue implemented as a sorted permanent array.
+ */
+function PermanentPriorityQueue() {
+   let queue = new PermanentArray();
+
+   this.push = function (node, priority) {
+      node.priority_in_queue = priority;
+      // The path nodes array is sorted in descending order.
+      // Use binary search to find the place to put the new node.
+      let start = 0;
+      let end = queue.count;
+      while (start < end) {
+         let i = (start + end) >> 1;
+         if (node.priority_in_queue > queue.array[i].priority_in_queue) {
+            end = i;
+         } else {
+            start = i+1;
+         }
+      }
+      queue.insertAt(end, node);
+   };
+   this.pop = function () {
+      return queue.pop();
+   };
+   this.empty = function () {
+      return (queue.count == 0);
+   };
+}
+
 //==============================================================================
 
 function interpolateBetweenPoints(frame1, frame2, delta) {
-   return [
-      frame1[0] + (frame2[0] - frame1[0]) * delta,
-      frame1[1] + (frame2[1] - frame1[1]) * delta
-   ];
+   let point = this.reusable_point;
+   point[0] = linearInterpolation(frame1[0], frame2[0], delta);
+   point[1] = linearInterpolation(frame1[1], frame2[1], delta);
+   return point;
 }
 function interpolateBetweenCircles(frame1, frame2, delta) {
-   return {
-      radius: frame1.radius + (frame2.radius - frame1.radius) * delta,
-      center: interpolateBetweenPoints(frame1.center, frame2.center, delta)
-   };
+   let circle = this.reusable_circle;
+   circle.center[0] = linearInterpolation(frame1.center[0], frame2.center[0], delta);
+   circle.center[1] = linearInterpolation(frame1.center[1], frame2.center[1], delta);
+   circle.radius    = linearInterpolation(frame1.radius,    frame2.radius,    delta);
+   return circle;
 }
 function interpolateBetweenEdges(frame1, frame2, delta) {
-   return {
-      pt1: interpolateBetweenPoints(frame1.pt1, frame2.pt1, delta),
-      pt2: interpolateBetweenPoints(frame1.pt2, frame2.pt2, delta)
-   };
+   let edge = this.reusable_edge;
+   edge.pt1[0] = linearInterpolation(frame1.pt1[0], frame2.pt1[0], delta);
+   edge.pt1[1] = linearInterpolation(frame1.pt1[1], frame2.pt1[1], delta);
+   edge.pt2[0] = linearInterpolation(frame1.pt2[0], frame2.pt2[0], delta);
+   edge.pt2[1] = linearInterpolation(frame1.pt2[1], frame2.pt2[1], delta);
+   return edge;
 }
 
-function getModelEntities(json) {
+function Model(gl, json) {
+   let entities = json['entities'];
    let vertices = json['vertices'];
-   let entities = {};
-   for (let entity of json['entities']) {
+   this.model_renderer = new ModelRenderer(gl, json);
+   this.reusable_point = [0,0];
+   this.reusable_circle = {center: [0,0], radius: 0};
+   this.reusable_edge = {pt1: [0,0], pt2: [0,0]};
+   this.entity_interpolate_func = {};
+   this.entities = {};
+   // Save the appropriate interpolation function for the given entity type.
+   // Determine entity coordinates for all animation frames.
+   for (let entity of entities) {
       let name = entity['name'];
+      let kind = entity['kind'];
       let val = entity['value'];
-      // Save the appropriate interpolation function for the given entity type.
-      // Determine entity coordinates for all animation frames.
-      if (entity['kind'] == 'point') {
-         entities[name] = {interpolate_func: interpolateBetweenPoints};
+      if (kind == 'point') {
+         this.entity_interpolate_func[name] = interpolateBetweenPoints;
+         this.entities[name] = {};
          for (let anim_name in vertices) {
-            entities[name][anim_name] = vertices[anim_name].map(function (frame) {
+            this.entities[name][anim_name] = vertices[anim_name].map(function (frame) {
                return frame[val];
             });
          }
-      } else if (entity['kind'] == 'circle') {
-         entities[name] = {interpolate_func: interpolateBetweenCircles};
-         for (let anim_name in vertices) {
-            entities[name][anim_name] = vertices[anim_name].map(function (frame) {
+      }
+      if (kind == 'circle') {
+         this.entity_interpolate_func[name] = interpolateBetweenCircles;
+         this.entities[name] = {};
+          for (let anim_name in vertices) {
+            this.entities[name][anim_name] = vertices[anim_name].map(function (frame) {
                return {
                   radius: distanceBetweenTwoPoints(frame[val[0]], frame[val[1]]),
                   center: frame[val[0]]
                };
             });
          }
-      } else if (entity['kind'] == 'edge') {
-         entities[name] = {interpolate_func: interpolateBetweenEdges};
+      }
+      if (kind == 'edge') {
+         this.entity_interpolate_func[name] = interpolateBetweenEdges;
+         this.entities[name] = {};
          for (let anim_name in vertices) {
-            entities[name][anim_name] = vertices[anim_name].map(function (frame) {
+            this.entities[name][anim_name] = vertices[anim_name].map(function (frame) {
                return {
                   pt1: frame[val[0]],
                   pt2: frame[val[1]]
@@ -108,12 +202,6 @@ function getModelEntities(json) {
          }
       }
    }
-   return entities;
-}
-
-function Model(gl, json) {
-   this.entities = getModelEntities(json);
-   this.model_renderer = new ModelRenderer(gl, json);
 }
 
 Model.prototype.draw = function (shader, anim_name, anim_pos) {
@@ -132,38 +220,46 @@ Model.prototype.get = function (entity_name, anim_name, anim_pos) {
       return frames[i1];
    } else {
       // Perform linear interpolation based on animation position.
-      return this.entities[entity_name].interpolate_func(frames[i1], frames[i2], delta);
+      return this.entity_interpolate_func[entity_name](frames[i1], frames[i2], delta);
    }
 }
 
 //==============================================================================
 
-function traverseBranch(func, bbox) {
+function branchForEach(bbox, func_name, func_arg) {
    let sub1 = this.sub1;
    let sub2 = this.sub2;
    if (bbox) {
       if ((sub1.right > bbox.left) && (sub1.left < bbox.right) && (sub1.top > bbox.bottom) && (sub1.bottom < bbox.top)) {
          if ((sub1.left >= bbox.left) && (sub1.right <= bbox.right) && (sub1.bottom >= bbox.bottom) && (sub1.top <= bbox.top)) {
-            sub1.traverse(func, null);
+            sub1.forEach(null, func_name, func_arg);
          } else {
-            sub1.traverse(func, bbox);
+            sub1.forEach(bbox, func_name, func_arg);
          }
       }
       if ((sub2.right > bbox.left) && (sub2.left < bbox.right) && (sub2.top > bbox.bottom) && (sub2.bottom < bbox.top)) {
          if ((sub2.left >= bbox.left) && (sub2.right <= bbox.right) && (sub2.bottom >= bbox.bottom) && (sub2.top <= bbox.top)) {
-            sub2.traverse(func, null);
+            sub2.forEach(null, func_name, func_arg);
          } else {
-            sub2.traverse(func, bbox);
+            sub2.forEach(bbox, func_name, func_arg);
          }
       }
    } else {
-      sub1.traverse(func, null);
-      sub2.traverse(func, null);
+      sub1.forEach(null, func_name, func_arg);
+      sub2.forEach(null, func_name, func_arg);
    }
 }
 
-function traverseLeaf(func, bbox) {
-   func(this);
+function leafForEach(bbox, func_name, func_arg) {
+   this[func_name](func_arg);
+}
+
+function leafCollect(arr) {
+   arr.push(this);
+}
+
+function leafIgnore(arr) {
+   // Don't insert into the array.
 }
 
 function MapNode(json_node, vertices) {
@@ -173,28 +269,32 @@ function MapNode(json_node, vertices) {
    this.top    = json_node['bbox'][3];
 
    if (json_node['kind'] == 'branch') {
-      this.traverse = traverseBranch;
+      this.forEach = branchForEach;
       this.sub1 = new MapNode(json_node['sub1'], vertices);
       this.sub2 = new MapNode(json_node['sub2'], vertices);
-   } else if (json_node['kind'] == 'polygon') {
-      this.traverse = traverseLeaf;
-      this.index_array = json_node['value'];
-   } else { // Entities.
-      this.traverse = traverseLeaf;
-      this.is_shadow_caster = false;
-      this.is_collider = false;
-      this.is_pathnode = false;
+      return;
+   }
+   if (json_node['kind'] == 'polygon') {
+      this.forEach = leafForEach;
+      this.collect = leafCollect;
+      this.index_array = new Uint16Array(json_node['value']);
+      return;
+   }
+   // This is an entity.
+   this.forEach = leafForEach;
+   this.collectShadowCaster = leafIgnore;
+   this.collectCollider = leafIgnore;
+   this.collectPathNode = leafIgnore;
 
-      if (json_node['kind'] == 'edge') {
-         let indexes = json_node['value'];
-         this.pt1 = vertices[indexes[0]];
-         this.pt2 = vertices[indexes[1]];
-         this.is_shadow_caster = true;
-         this.is_collider = true;
-      }
-      if (json_node['kind'] == 'rectangle') {
-         this.is_pathnode = true;
-      }
+   if (json_node['kind'] == 'edge') {
+      let indexes = json_node['value'];
+      this.pt1 = vertices[indexes[0]];
+      this.pt2 = vertices[indexes[1]];
+      this.collectShadowCaster = leafCollect;
+      this.collectCollider = leafCollect;
+   }
+   if (json_node['kind'] == 'rectangle') {
+      this.collectPathNode = leafCollect;
    }
 }
 
@@ -207,70 +307,66 @@ function Map(gl, json) {
    this.entities_root = new MapNode(entities, vertices);
    this.polygons_root = new MapNode(polygons, vertices);
    this.map_renderer = new MapRenderer(gl, json);
+   this.array_pool = new ObjectPool(
+      () => new PermanentArray(),
+      (arr) => arr.clear()
+   );
+   this.reusable_array = new PermanentArray();
+   this.pathnode_queue = new PermanentPriorityQueue();
    this.initializePathNodes();
 }
 
 Map.prototype.draw = function (shader, camera) {
-   let polygons = [];
-   let collect_polygon = function (node) {
-      polygons.push(node);
-   };
-   this.polygons_root.traverse(collect_polygon, camera.getBoundingBox());
-   this.map_renderer.draw(polygons, shader, camera);
+   let polygons = this.reusable_array;
+   this.polygons_root.forEach(camera.getBoundingBox(), 'collect', polygons);
+   this.map_renderer.draw(polygons.array, polygons.count, shader);
+   polygons.clear();
 }
 
 Map.prototype.drawShadowMap = function (shader, camera, light_position) {
-   let shadow_casters = [];
-   let collect_shadow_caster = function (node) {
-      if (node.is_shadow_caster) {
-         shadow_casters.push(node);
-      }
-   };
-   this.entities_root.traverse(collect_shadow_caster, camera.getBoundingBox());
-   this.map_renderer.drawShadowMap(shadow_casters, shader, camera, light_position);
+   let shadow_casters = this.reusable_array;
+   this.entities_root.forEach(camera.getBoundingBox(), 'collectShadowCaster', shadow_casters);
+   this.map_renderer.drawShadowMap(shadow_casters.array, shadow_casters.count, shader, camera, light_position);
+   shadow_casters.clear();
 }
 
 Map.prototype.getPotentialColliders = function (start_position, delta_position, radius) {
-   let potential_colliders = [];
+   let potential_colliders = this.array_pool.get();
    let reach = radius + Vector2.length(delta_position);
-   let bbox = {
-      left:   start_position[0] - reach,
-      right:  start_position[0] + reach,
-      bottom: start_position[1] - reach,
-      top:    start_position[1] + reach
-   };
-   let collect_collider = function (node) {
-      if (node.is_collider) {
-         potential_colliders.push(node);
-      }
-   };
-   this.entities_root.traverse(collect_collider, bbox);
+   let bbox = BoundingBox.pool.get();
+   bbox.left   = start_position[0] - reach;
+   bbox.right  = start_position[0] + reach;
+   bbox.bottom = start_position[1] - reach;
+   bbox.top    = start_position[1] + reach;
+   this.entities_root.forEach(bbox, 'collectCollider', potential_colliders);
    return potential_colliders;
 }
 
-function checkCollision(start_position, delta_position, radius, potential_colliders) {
+Map.prototype.checkCollision = function (start_position, delta_position, radius, potential_colliders) {
+   let colliders = this.array_pool.get();
    let new_position = Vector2.add(start_position, delta_position);
-   let colliders = [];
-   for (let edge of potential_colliders) {
-      if (lineSegmentCircleCollide(lineFromTwoPoints(edge.pt1, edge.pt2), new_position, radius)) {
+   for (let i = 0; i < potential_colliders.count; i++) {
+      let edge = potential_colliders.array[i];
+      if (lineSegmentCircleCollide(Vector4.lineFromTwoPoints(edge.pt1, edge.pt2), new_position, radius)) {
          colliders.push(edge);
       }
    }
    return colliders;
 }
 
-function tryResolveCollision(start_position, delta_position, radius, potential_colliders) {
-   let colliders = checkCollision(start_position, delta_position, radius, potential_colliders);
-   if (colliders.length > 0) {
+Map.prototype.tryResolveCollision = function (start_position, delta_position, radius, potential_colliders) {
+   let colliders = this.checkCollision(start_position, delta_position, radius, potential_colliders);
+   if (colliders.count > 0) {
       let saved_delta = null;
       let saved_length = 0;
-      for (let edge of colliders) {
+      for (let i = 0; i < colliders.count; i++) {
          // In case of collision with an edge try to move along that edge.
+         let edge = colliders.array[i];
          let edge_vector = Vector2.normalize(Vector2.subtract(edge.pt1, edge.pt2));
          let try_delta = Vector2.scale(Vector2.dot(delta_position, edge_vector), edge_vector);
          let try_length = Vector2.length(try_delta);
-         let try_colliders = checkCollision(start_position, try_delta, radius, potential_colliders);
-         if (try_colliders.length == 0) {
+         let try_colliders = this.checkCollision(start_position, try_delta, radius, potential_colliders);
+         if (try_colliders.count == 0) {
             // Movement is possible, check if it is the best option so far (longest distance).
             if (saved_length < try_length) {
                saved_length = try_length;
@@ -284,7 +380,7 @@ function tryResolveCollision(start_position, delta_position, radius, potential_c
    }
 }
 
-function tryResolveCollisionFallback(start_position, delta_position, radius, potential_colliders) {
+Map.prototype.tryResolveCollisionFallback = function (start_position, delta_position, radius, potential_colliders) {
    let saved_delta = null;
    let saved_nearset = null;
    let saved_dist = 0;
@@ -292,9 +388,10 @@ function tryResolveCollisionFallback(start_position, delta_position, radius, pot
    // which collide with the entity start position (i.e. the shortest distance between
    // the center of the entity and the line is less than the entity radius). From them,
    // select the edge for which the movement needed to correct the collision is smallest.
-   let colliders = checkCollision(start_position, delta_position, radius, potential_colliders);
-   for (let edge of colliders) {
-      let nearest = nearestPointAtLine(lineFromTwoPoints(edge.pt1, edge.pt2), start_position);
+   let colliders = this.checkCollision(start_position, delta_position, radius, potential_colliders);
+   for (let i = 0; i < colliders.count; i++) {
+      let edge = colliders.array[i];
+      let nearest = Vector2.nearestPointAtLine(Vector4.lineFromTwoPoints(edge.pt1, edge.pt2), start_position);
       let dist = distanceBetweenTwoPoints(nearest, start_position);
       if (dist < radius && (!saved_nearset || saved_dist < dist)) {
          saved_nearset = nearest;
@@ -306,8 +403,8 @@ function tryResolveCollisionFallback(start_position, delta_position, radius, pot
    if (saved_nearset) {
       let edge_normal = Vector2.normalize(Vector2.subtract(start_position, saved_nearset));
       let try_delta = Vector2.scale(Vector2.length(delta_position), edge_normal);
-      let try_colliders = checkCollision(start_position, try_delta, radius, potential_colliders);
-      if (try_colliders.length == 0) {
+      let try_colliders = this.checkCollision(start_position, try_delta, radius, potential_colliders);
+      if (try_colliders.count == 0) {
          saved_delta = try_delta;
       }
    }
@@ -319,24 +416,26 @@ Map.prototype.resolveCollision = function (start_position, delta_position, radiu
    let num_steps = 2;
    let position = start_position;
    let step_delta = Vector2.scale(1.0 / num_steps, delta_position);
-   let total_delta = [0,0];
+   let total_delta = Vector2.construct(0,0);
    for (let i = 0; i < num_steps; i++) {
-      let try_delta = tryResolveCollision(position, step_delta, radius, potential_colliders);
+      let try_delta = this.tryResolveCollision(position, step_delta, radius, potential_colliders);
       if (!try_delta) {
-         try_delta = tryResolveCollisionFallback(position, step_delta, radius, potential_colliders);
+         try_delta = this.tryResolveCollisionFallback(position, step_delta, radius, potential_colliders);
       }
       if (try_delta) {
          position = Vector2.add(position, try_delta);
          total_delta = Vector2.add(total_delta, try_delta);
       }
    }
+   this.array_pool.releaseAll();
    return total_delta;
 }
 
 //==============================================================================
 
 Map.prototype.initializePathNodes = function () {
-   let all_nodes = this.getPathNodesInBoundingBox(null);
+   let all_nodes = [];
+   this.entities_root.forEach(null, 'collectPathNode', all_nodes);
    for (let current_node of all_nodes) {
       current_node.neighbors = [];
       current_node.overlaps = [];
@@ -344,7 +443,9 @@ Map.prototype.initializePathNodes = function () {
    }
    // Connect overlapping path nodes.
    for (let current_node of all_nodes) {
-      for (let other_node of this.getPathNodesInBoundingBox(current_node)) {
+      let overlapping_nodes = [];
+      this.entities_root.forEach(current_node, 'collectPathNode', overlapping_nodes);
+      for (let other_node of overlapping_nodes) {
          // Ensure that the connection is not yet established.
          if ((current_node !== other_node) && !current_node.neighbors.includes(other_node)) {
             // Create a common "overlap" object referenced by both nodes.
@@ -367,55 +468,47 @@ Map.prototype.initializePathNodes = function () {
    }
    // Identifier to distinguish already visited path nodes.
    this.path_id = 0;
+   this.path_end = [0,0];
 }
 
-Map.prototype.getPathNodesInBoundingBox = function (bbox) {
-   let pathnodes = [];
-   let collect_pathnodes = function (node) {
-      if (node.is_pathnode) {
-         pathnodes.push(node);
-      }
-   };
-   this.entities_root.traverse(collect_pathnodes, bbox);
-   return pathnodes;
-}
-
-Map.prototype.getPathNodesAtPosition = function (position) {
-   let bbox = {
-      left:   position[0],
-      right:  position[0],
-      bottom: position[1],
-      top:    position[1]
-   };
-   return this.getPathNodesInBoundingBox(bbox);
-}
-
-// TODO: Dijkstra’s algorithm.
 Map.prototype.constructPathEndingAt = function (end_position) {
-   this.path_end = end_position;
    this.path_id += 1;
-   let frontier = this.getPathNodesAtPosition(end_position);
-   for (let start_node of frontier) {
-      start_node.path_id = this.path_id;
-      start_node.path_overlap = null;
-      start_node.path_length = 0;
+   Vector2.copy(this.path_end, end_position);
+   // Start from the path nodes at the end position.
+   let start_bbox = BoundingBox.bboxFromPoint(end_position);
+   let start_nodes = this.reusable_array;
+   this.entities_root.forEach(start_bbox, 'collectPathNode', start_nodes);
+   // Reset starting path nodes and put them to the frontier queue.
+   let frontier = this.pathnode_queue;
+   while (start_nodes.count > 0) {
+      let node = start_nodes.pop();
+      node.path_id = this.path_id;
+      node.path_overlap = null;
+      node.path_length = 0;
+      frontier.push(node, 0);
    }
-   while (frontier.length > 0) {
-      let current_node = frontier.shift();
+   // Dijkstra's Algorithm.
+   while (!frontier.empty()) {
+      // Get the node with the shortest path length from the frontier queue.
+      let current_node = frontier.pop();
       for (let i = 0; i < current_node.neighbors.length; i++) {
-         let other_node = current_node.neighbors[i];
-         let overlap = current_node.overlaps[i];
-         if (other_node.path_id != this.path_id) {
+         let other_node  = current_node.neighbors[i];
+         let overlap     = current_node.overlaps[i];
+         let path_length = current_node.path_length;
+         // For each neighbor node, calculate path length for the current route.
+         if (current_node.path_overlap) {
+            path_length += distanceBetweenTwoPoints(current_node.path_overlap.center, overlap.center);
+         } else {
+            path_length += distanceBetweenTwoPoints(end_position, overlap.center);
+         }
+         // If it is the first time the neighbor node is visited, or it was already visited
+         // but the current route is shorter than the previous one, then update the neighbor
+         // node and put it into the frontier.
+         if (other_node.path_id != this.path_id || other_node.path_length > path_length) {
             other_node.path_id = this.path_id;
             other_node.path_overlap = overlap;
-            other_node.path_length = current_node.path_length;
-
-            if (current_node.path_overlap) {
-               other_node.path_length += distanceBetweenTwoPoints(current_node.path_overlap.center, overlap.center);
-            } else {
-               other_node.path_length += distanceBetweenTwoPoints(end_position, overlap.center);
-            }
-            frontier.push(other_node);
+            other_node.path_length = path_length;
+            frontier.push(other_node, path_length);
          }
       }
    }
@@ -424,7 +517,11 @@ Map.prototype.constructPathEndingAt = function (end_position) {
 Map.prototype.getMoveTargetFromPath = function (start_position, radius) {
    let target_pos = null;
    let start_node = null;
-   for (let node of this.getPathNodesAtPosition(start_position)) {
+   let start_bbox = BoundingBox.bboxFromPoint(start_position);
+   let start_nodes = this.reusable_array;
+   this.entities_root.forEach(start_bbox, 'collectPathNode', start_nodes);
+   while (start_nodes.count > 0) {
+      let node = start_nodes.pop();
       if (node.path_id == this.path_id) {
          // Select the node with the shortest path length.
          if (!start_node || (start_node.path_length > node.path_length)) {
@@ -451,7 +548,7 @@ Map.prototype.getMoveTargetFromPath = function (start_position, radius) {
          if (overlap.top - overlap.bottom > margin * 2.0) {
             y = Math.min(Math.max(start_position[1], overlap.bottom + margin), overlap.top - margin);
          }
-         target_pos = [x, y];
+         target_pos = Vector2.construct(x, y);
       }
    }
    return target_pos;
@@ -461,17 +558,17 @@ Map.prototype.getMoveTargetFromPath = function (start_position, radius) {
 
 function MovingEntity(properties) {
    let map = null;
-   let look_vec = null;
-   let position = null;
+   let look_vec = [0,0];
+   let position = [0,0];
    let velocity = [0,0]; // Based on actual position changes.
    let move_vec = [0,0]; // Attempted move direction.
 
    this.spawn = function (spawn_map, spawn_position) {
       map = spawn_map;
-      position = spawn_position;
+      Vector2.copy(position, spawn_position);
    };
    this.getLookAngle = function () {
-      if (look_vec) {
+      if (Vector2.length(look_vec) > 0) {
          return angleFromVector(look_vec);
       } else {
          return angleFromVector(move_vec);
@@ -487,10 +584,10 @@ function MovingEntity(properties) {
       return position;
    };
    this.instantlyLookAt = function (target_position) {
-      look_vec = Vector2.subtract(target_position, position);
+      Vector2.copy(look_vec, Vector2.subtract(target_position, position));
    };
    this.turnTowardsTarget = function (target_position, dt) {
-      if (look_vec) {
+      if (Vector2.length(look_vec) > 0) {
          let target_vec = Vector2.subtract(target_position, position);
          // Calculate the current and requested look angle.
          let look_angle   = angleFromVector(look_vec);
@@ -501,11 +598,11 @@ function MovingEntity(properties) {
          // If so, then rotate the original look vector according to the angular speed.
          // Otherwise just overwrite the look vector with the new one.
          if (delta > max_delta) {
-            look_vec = Vector2.transform(Matrix3.rotation(+max_delta), look_vec);
+            Vector2.copy(look_vec, Vector2.transform(Matrix3.rotation(+max_delta), look_vec));
          } else if (delta < -max_delta) {
-            look_vec = Vector2.transform(Matrix3.rotation(-max_delta), look_vec);
+            Vector2.copy(look_vec, Vector2.transform(Matrix3.rotation(-max_delta), look_vec));
          } else {
-            look_vec = target_vec;
+            Vector2.copy(look_vec, target_vec);
          }
       } else {
          this.instantlyLookAt(target_position);
@@ -513,7 +610,7 @@ function MovingEntity(properties) {
    };
    this.moveInDirection = function (move_direction, dt) {
       // Save attempted move direction.
-      move_vec = Vector2.normalize(move_direction);
+      Vector2.copy(move_vec, Vector2.normalize(move_direction));
       // Calculate change of the velocity from friction. Friction depends
       // on the current speed, and is equal to acceleration for max speed.
       let dv1 = Vector2.scale(-(properties.acceleration / properties.maximum_speed) * dt, velocity);
@@ -525,7 +622,7 @@ function MovingEntity(properties) {
       let ds1 = Vector2.scale(dt, v);
       let ds2 = map.resolveCollision(position, ds1, properties.radius);
       // Calculate the final position and velocity.
-      position = Vector2.add(position, ds2);
-      velocity = Vector2.scale(1.0 / dt, ds2);
+      Vector2.copy(position, Vector2.add(position, ds2));
+      Vector2.copy(velocity, Vector2.scale(1.0 / dt, ds2));
    };
 }
