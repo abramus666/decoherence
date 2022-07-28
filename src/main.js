@@ -11,10 +11,10 @@ const GAME_PROPERTIES = {
 };
 
 const MAP01_PROPERTIES = {
-   diffuse_url:  'map/test.diff.png',
-   specular_url: 'map/test.spec.png',
-   normal_url:   'map/test.norm.png',
-   map_url:      'map/test.json'
+   diffuse_url:  'map/test_map.diff.png',
+   specular_url: 'map/test_map.spec.png',
+   normal_url:   'map/test_map.norm.png',
+   map_url:      'map/test_map.json'
 };
 
 const PLAYER_PROPERTIES = {
@@ -22,10 +22,10 @@ const PLAYER_PROPERTIES = {
    maximum_speed: 5.0,
    angular_speed: 2.0*Math.PI,
    radius:        0.5,
-   diffuse_url:   'model/test.diff.png',
-   specular_url:  'model/test.spec.png',
-   normal_url:    'model/test.norm.png',
-   model_url:     'model/test.json'
+   diffuse_url:   'model/test_model.diff.png',
+   specular_url:  'model/test_model.spec.png',
+   normal_url:    'model/test_model.norm.png',
+   model_url:     'model/test_model.json'
 };
 
 const ENEMY_PROPERTIES = {
@@ -33,10 +33,10 @@ const ENEMY_PROPERTIES = {
    maximum_speed: 2.0,
    angular_speed: 2.0*Math.PI,
    radius:        0.5,
-   diffuse_url:   'model/test.diff.png',
-   specular_url:  'model/test.spec.png',
-   normal_url:    'model/test.norm.png',
-   model_url:     'model/test.json'
+   diffuse_url:   'model/test_model.diff.png',
+   specular_url:  'model/test_model.spec.png',
+   normal_url:    'model/test_model.norm.png',
+   model_url:     'model/test_model.json'
 };
 
 const RESOURCES = [
